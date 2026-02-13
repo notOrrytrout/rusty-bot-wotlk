@@ -1785,6 +1785,10 @@ impl ProxyAgentApi {
                     "move stop".to_string(),
                 ],
             },
+            AgentToolCall::TargetGuid(_)
+            | AgentToolCall::TargetNearestNpc(_)
+            | AgentToolCall::Interact(_)
+            | AgentToolCall::Cast(_) => vec![],
         }
     }
 }
@@ -1834,6 +1838,21 @@ impl AgentGameApi for ProxyAgentApi {
                     status: AgentToolStatus::Failed,
                     reason: "confirm_required".to_string(),
                     facts: serde_json::Value::Null,
+                });
+            }
+
+            // Packet support for these is not implemented in the proxy yet.
+            if matches!(
+                tool.call,
+                AgentToolCall::TargetGuid(_)
+                    | AgentToolCall::TargetNearestNpc(_)
+                    | AgentToolCall::Interact(_)
+                    | AgentToolCall::Cast(_)
+            ) {
+                return Ok(AgentToolResult {
+                    status: AgentToolStatus::Failed,
+                    reason: "unsupported_tool_not_implemented".to_string(),
+                    facts: serde_json::json!({ "tool": format!("{:?}", tool.call) }),
                 });
             }
 
@@ -2187,6 +2206,9 @@ async fn run_agent_llm_injector(
                             "ok": true,
                             "enabled": enabled,
                             "goal": agent.memory.goal.clone(),
+                            "goal_id": agent.memory.goal_id,
+                            "goal_state": agent.memory.goal_state,
+                            "goal_state_reason": agent.memory.goal_state_reason,
                             "last_error": agent.memory.last_error.clone(),
                             "executor_state": format!("{:?}", agent.executor.state),
                             "history_len": agent.memory.history.len(),

@@ -225,9 +225,9 @@ Acceptance checks
 - [x] Add goal input:
   - [x] startup env var: `RUSTY_BOT_GOAL`
   - [x] runtime update (recommended): control port command (`crates/gateway-proxy/src/proxy.rs`)
-- [ ] Define goal lifecycle states:
-  - [ ] `active`, `completed`, `blocked`, `aborted`
-- [ ] Add goal completion heuristics for the MVP goals.
+- [x] Define goal lifecycle states:
+  - [x] `active`, `completed`, `blocked`, `aborted` (v0 state tracking)
+- [x] Add goal completion heuristics for the MVP goals. (v0 heuristics: stop/idle completion + blocked when self-state missing)
 
 ### 9) Control Port Upgrade (Optional but High Leverage)
 Current: raw `opcode_hex body_hex`.
@@ -256,11 +256,17 @@ Acceptance checks
 ### 10) First Real Capabilities (After Framework Is Stable)
 These depend on new packet support + state tracking; keep them blocked until framework above is solid.
 - [ ] Targeting tools:
+  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+  - [ ] Proxy packet injection + completion checks
   - [ ] `target_guid { guid }`
   - [ ] `target_nearest_npc { entry?: u32 }`
 - [ ] `interact { guid }` (packet support + completion checks)
+  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+  - [ ] Proxy packet injection + completion checks
 - [ ] “Follow target” goal v1 (turn + move + stop loops)
 - [ ] Combat v0 (very crude):
+  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+  - [ ] Proxy packet injection + completion checks
   - [ ] `cast { slot }`
   - [ ] stop moving when combat detected
   - [ ] detect “something happened” via combat log/state deltas

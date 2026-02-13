@@ -12,6 +12,10 @@ pub enum ToolId {
     RequestJump,
     RequestEmote,
     RequestIdle,
+    TargetGuid,
+    TargetNearestNpc,
+    Interact,
+    Cast,
 }
 
 pub trait Tool {
@@ -35,6 +39,10 @@ impl Tool for ToolId {
             ToolId::RequestJump => "request_jump",
             ToolId::RequestEmote => "request_emote",
             ToolId::RequestIdle => "request_idle",
+            ToolId::TargetGuid => "target_guid",
+            ToolId::TargetNearestNpc => "target_nearest_npc",
+            ToolId::Interact => "interact",
+            ToolId::Cast => "cast",
         }
     }
 
@@ -50,6 +58,10 @@ impl Tool for ToolId {
                 "request_emote {\"key\":\"wave|hello|bye|cheer|dance|laugh|clap|salute\"}"
             }
             ToolId::RequestIdle => "request_idle {}",
+            ToolId::TargetGuid => "target_guid {\"guid\":123}",
+            ToolId::TargetNearestNpc => "target_nearest_npc {\"entry\":123} (entry optional)",
+            ToolId::Interact => "interact {\"guid\":123}",
+            ToolId::Cast => "cast {\"slot\":1..12}",
         }
     }
 
@@ -70,6 +82,10 @@ static TOOL_REGISTRY: &[ToolId] = &[
     ToolId::RequestJump,
     ToolId::RequestEmote,
     ToolId::RequestIdle,
+    ToolId::TargetGuid,
+    ToolId::TargetNearestNpc,
+    ToolId::Interact,
+    ToolId::Cast,
 ];
 
 pub fn registry() -> &'static [ToolId] {
@@ -120,6 +136,10 @@ pub fn tool_id_for_call(tool: &ToolCall) -> ToolId {
         ToolCall::RequestJump => ToolId::RequestJump,
         ToolCall::RequestEmote(_) => ToolId::RequestEmote,
         ToolCall::RequestIdle => ToolId::RequestIdle,
+        ToolCall::TargetGuid(_) => ToolId::TargetGuid,
+        ToolCall::TargetNearestNpc(_) => ToolId::TargetNearestNpc,
+        ToolCall::Interact(_) => ToolId::Interact,
+        ToolCall::Cast(_) => ToolId::Cast,
     }
 }
 
@@ -135,6 +155,10 @@ pub fn default_timeout(tool: &ToolCall) -> Duration {
         ToolCall::RequestTurn(RequestTurnArgs { duration_ms, .. }) => {
             Duration::from_millis((*duration_ms).into())
         }
+        ToolCall::TargetGuid(_) => Duration::from_millis(900),
+        ToolCall::TargetNearestNpc(_) => Duration::from_millis(900),
+        ToolCall::Interact(_) => Duration::from_millis(1200),
+        ToolCall::Cast(_) => Duration::from_millis(1400),
         ToolCall::RequestEmote(_) => Duration::from_millis(1800),
         ToolCall::RequestJump => Duration::from_millis(900),
         ToolCall::RequestStop(_) => Duration::from_millis(700),
@@ -185,6 +209,10 @@ mod tests {
             ToolId::RequestJump => "<tool_call>{\"name\":\"request_jump\",\"arguments\":{}}</tool_call>",
             ToolId::RequestEmote => "<tool_call>{\"name\":\"request_emote\",\"arguments\":{\"key\":\"wave\"}}</tool_call>",
             ToolId::RequestIdle => "<tool_call>{\"name\":\"request_idle\",\"arguments\":{}}</tool_call>",
+            ToolId::TargetGuid => "<tool_call>{\"name\":\"target_guid\",\"arguments\":{\"guid\":42}}</tool_call>",
+            ToolId::TargetNearestNpc => "<tool_call>{\"name\":\"target_nearest_npc\",\"arguments\":{}}</tool_call>",
+            ToolId::Interact => "<tool_call>{\"name\":\"interact\",\"arguments\":{\"guid\":42}}</tool_call>",
+            ToolId::Cast => "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1}}</tool_call>",
         }
     }
 

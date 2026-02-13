@@ -74,6 +74,7 @@ pub async fn tick(
 ) -> anyhow::Result<HarnessOutcome> {
     // Observe first. If observation fails, bubble up; callers can choose to continue.
     let obs = api.observe().await?;
+    agent.memory.tick_goal_v0(&obs);
 
     // Completion checks.
     if let Some((tool, result)) = agent.executor.tick_observation(&obs) {

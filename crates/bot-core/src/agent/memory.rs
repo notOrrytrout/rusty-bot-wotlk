@@ -6,6 +6,15 @@ use super::ToolInvocation;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum GoalState {
+    Active,
+    Completed,
+    Blocked,
+    Aborted,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
     Ok,
     Failed,
@@ -31,8 +40,16 @@ pub struct AgentMemory {
     pub goal: Option<String>,
     #[serde(default)]
     pub goal_id: Option<u64>,
+    #[serde(default)]
+    pub goal_state: Option<GoalState>,
+    #[serde(default)]
+    pub goal_state_reason: Option<String>,
     #[serde(skip)]
     next_goal_id: u64,
+    #[serde(skip)]
+    missing_self_frames: u32,
+    #[serde(skip)]
+    idle_frames: u32,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -45,7 +62,11 @@ impl Default for AgentMemory {
         Self {
             goal: None,
             goal_id: None,
+            goal_state: None,
+            goal_state_reason: None,
             next_goal_id: 1,
+            missing_self_frames: 0,
+            idle_frames: 0,
             last_error: None,
             history: VecDeque::new(),
             history_limit: 12,
@@ -59,11 +80,40 @@ impl AgentMemory {
         let id = self.next_goal_id;
         self.next_goal_id = self.next_goal_id.saturating_add(1);
         self.goal_id = Some(id);
+        self.goal_state = Some(GoalState::Active);
+        self.goal_state_reason = None;
+        self.missing_self_frames = 0;
+        self.idle_frames = 0;
     }
 
     pub fn clear_goal(&mut self) {
         self.goal = None;
         self.goal_id = None;
+        self.goal_state = None;
+        self.goal_state_reason = None;
+        self.missing_self_frames = 0;
+        self.idle_frames = 0;
+    }
+
+    pub fn complete_goal(&mut self, reason: impl Into<String>) {
+        if self.goal.is_some() {
+            self.goal_state = Some(GoalState::Completed);
+            self.goal_state_reason = Some(reason.into());
+        }
+    }
+
+    pub fn block_goal(&mut self, reason: impl Into<String>) {
+        if self.goal.is_some() {
+            self.goal_state = Some(GoalState::Blocked);
+            self.goal_state_reason = Some(reason.into());
+        }
+    }
+
+    pub fn abort_goal(&mut self, reason: impl Into<String>) {
+        if self.goal.is_some() {
+            self.goal_state = Some(GoalState::Aborted);
+            self.goal_state_reason = Some(reason.into());
+        }
     }
 
     pub fn record(&mut self, tool: ToolInvocation, result: ToolResult) {
@@ -76,5 +126,108 @@ impl AgentMemory {
         while self.history.len() > self.history_limit {
             self.history.pop_front();
         }
+    }
+
+    pub fn tick_goal_v0(&mut self, obs: &crate::agent::observation::Observation) {
+        if self.goal.is_none() {
+            return;
+        }
+        if self.goal_state != Some(GoalState::Active) {
+            return;
+        }
+
+        // If we can't even see ourselves for a bit, we can't act reliably.
+        let has_self = obs.self_guid != 0 && obs.self_state.is_some();
+        if !has_self {
+            self.missing_self_frames = self.missing_self_frames.saturating_add(1);
+        } else {
+            self.missing_self_frames = 0;
+        }
+        if self.missing_self_frames >= 10 {
+            self.block_goal("no_self_state");
+            return;
+        }
+
+        // Minimal completion heuristic for "stop/idle" type goals.
+        let goal = self.goal.as_deref().unwrap_or("").to_ascii_lowercase();
+        let wants_idle = goal.contains("idle") || goal.contains("stop");
+        if wants_idle && !obs.derived.moving {
+            self.idle_frames = self.idle_frames.saturating_add(1);
+        } else {
+            self.idle_frames = 0;
+        }
+        if wants_idle && self.idle_frames >= 3 {
+            self.complete_goal("idle");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::observation::{DerivedFacts, Observation, SelfSummary, Vec3};
+
+    fn obs_with_self(moving: bool) -> Observation {
+        Observation {
+            tick: 1,
+            self_guid: 1,
+            self_state: Some(SelfSummary {
+                guid: 1,
+                pos: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+                orient: 0.0,
+                movement_flags: 0,
+                movement_time: 1,
+                hp: (1, 1),
+                level: 1,
+            }),
+            npcs_nearby: vec![],
+            players_nearby: vec![],
+            chat_log: vec![],
+            combat_log: vec![],
+            derived: DerivedFacts {
+                moving,
+                ..DerivedFacts::default()
+            },
+        }
+    }
+
+    fn obs_missing_self() -> Observation {
+        Observation {
+            tick: 1,
+            self_guid: 0,
+            self_state: None,
+            npcs_nearby: vec![],
+            players_nearby: vec![],
+            chat_log: vec![],
+            combat_log: vec![],
+            derived: DerivedFacts::default(),
+        }
+    }
+
+    #[test]
+    fn goal_blocks_when_self_state_missing_for_many_frames() {
+        let mut mem = AgentMemory::default();
+        mem.set_goal("do something");
+        assert_eq!(mem.goal_state, Some(GoalState::Active));
+
+        for _ in 0..10 {
+            mem.tick_goal_v0(&obs_missing_self());
+        }
+
+        assert_eq!(mem.goal_state, Some(GoalState::Blocked));
+        assert_eq!(mem.goal_state_reason.as_deref(), Some("no_self_state"));
+    }
+
+    #[test]
+    fn goal_completes_for_stop_idle_goals_when_not_moving_for_a_few_frames() {
+        let mut mem = AgentMemory::default();
+        mem.set_goal("stop moving");
+
+        for _ in 0..3 {
+            mem.tick_goal_v0(&obs_with_self(false));
+        }
+
+        assert_eq!(mem.goal_state, Some(GoalState::Completed));
+        assert_eq!(mem.goal_state_reason.as_deref(), Some("idle"));
     }
 }
