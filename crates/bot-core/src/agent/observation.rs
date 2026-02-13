@@ -11,8 +11,11 @@ pub struct Vec3 {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub struct DerivedFacts {
-    /// True if the current movement flags are non-zero.
+    /// True if the player appears to be moving or turning based on movement flags.
     pub moving: bool,
+    /// True if we have observed the real client correcting an injected movement template recently.
+    #[serde(default)]
+    pub client_correction_seen_recently: bool,
     /// Change in position since the last observation frame (if available).
     #[serde(default)]
     pub self_pos_delta: Option<Vec3>,
@@ -28,9 +31,15 @@ pub struct DerivedFacts {
     /// Change in the client movement timestamp (if available).
     #[serde(default)]
     pub self_movement_time_delta: Option<i64>,
-    /// Placeholder for higher level stuck detection (executor will set this later).
+    /// First-pass stuck detection: repeated translation movement with negligible position change.
     #[serde(default)]
     pub stuck_suspected: bool,
+    /// Number of consecutive frames that looked like "trying to translate but not making progress".
+    #[serde(default)]
+    pub stuck_frames: u32,
+    /// Best-effort reason string (short and stable) for why we suspect we're stuck.
+    #[serde(default)]
+    pub stuck_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -57,6 +66,9 @@ pub struct SelfSummary {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Observation {
     pub tick: u64,
+    /// Self GUID as tracked by the proxy (0 if unknown).
+    #[serde(default)]
+    pub self_guid: u64,
     pub self_state: Option<SelfSummary>,
     #[serde(default)]
     pub npcs_nearby: Vec<EntitySummary>,
@@ -146,6 +158,7 @@ impl Observation {
 
         Self {
             tick,
+            self_guid,
             self_state,
             npcs_nearby: npcs,
             players_nearby: others,
@@ -156,19 +169,33 @@ impl Observation {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ObservationInputs {
+    pub self_guid: u64,
+    pub client_correction_seen_recently: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct ObservationBuilder {
     last_self_pos: Option<Vec3>,
     last_orient: Option<f32>,
     last_movement_time: Option<u64>,
+    stuck_frames: u32,
 }
 
 impl ObservationBuilder {
-    pub fn build(&mut self, world: &WorldState, self_guid: u64) -> Observation {
-        let mut obs = Observation::from_world(world, self_guid);
+    pub fn build(&mut self, world: &WorldState, inputs: ObservationInputs) -> Observation {
+        let mut obs = Observation::from_world(world, inputs.self_guid);
+        obs.derived.client_correction_seen_recently = inputs.client_correction_seen_recently;
 
         if let Some(self_state) = obs.self_state.as_ref() {
-            obs.derived.moving = self_state.movement_flags != 0;
+            const MOVE_MASK: u32 = 0x00000001
+                | 0x00000002
+                | 0x00000004
+                | 0x00000008
+                | 0x00000010
+                | 0x00000020;
+            obs.derived.moving = (self_state.movement_flags & MOVE_MASK) != 0;
 
             if let Some(prev_pos) = self.last_self_pos {
                 let delta = Vec3 {
@@ -202,10 +229,39 @@ impl ObservationBuilder {
             self.last_self_pos = Some(self_state.pos);
             self.last_orient = Some(self_state.orient);
             self.last_movement_time = Some(self_state.movement_time);
+
+            // Stuck detection v0: if we're translating (not just turning) and time is advancing
+            // but our position isn't changing, treat it as "stuck suspected".
+            const TRANSLATE_MASK: u32 = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008;
+            const STUCK_DIST_EPSILON: f32 = 0.05;
+            const STUCK_FRAME_THRESHOLD: u32 = 6;
+            let translating = (self_state.movement_flags & TRANSLATE_MASK) != 0;
+            let time_advancing = obs
+                .derived
+                .self_movement_time_delta
+                .map(|d| d != 0)
+                .unwrap_or(false);
+            let dist = obs.derived.self_dist_moved;
+            if translating && time_advancing && dist.map(|d| d < STUCK_DIST_EPSILON).unwrap_or(false)
+            {
+                self.stuck_frames = self.stuck_frames.saturating_add(1);
+            } else {
+                self.stuck_frames = 0;
+            }
+            obs.derived.stuck_frames = self.stuck_frames;
+            if self.stuck_frames >= STUCK_FRAME_THRESHOLD {
+                obs.derived.stuck_suspected = true;
+                let mut reason = "translating_no_progress".to_string();
+                if inputs.client_correction_seen_recently {
+                    reason.push_str(" client_correction_recent");
+                }
+                obs.derived.stuck_reason = Some(reason);
+            }
         } else {
             self.last_self_pos = None;
             self.last_orient = None;
             self.last_movement_time = None;
+            self.stuck_frames = 0;
         }
 
         obs

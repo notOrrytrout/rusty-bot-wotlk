@@ -185,15 +185,15 @@ Acceptance checks
   - [x] “confirm=true” must be present in args to execute (scaffold)
 
 ### 6) Observation Improvements (Make Planning Actually Work)
-- [ ] Cap lists and sort nearby entities by distance (top N).
-- [ ] Add derived fields needed for completion checks:
-  - [ ] `self_guid` (already tracked in injection guard)
-  - [ ] `self_pos` and `self_orient`
-  - [ ] `last_position_delta`
-  - [ ] `client_correction_seen_recently` (already tracked)
-- [ ] Add stuck detection v0:
-  - [ ] Count repeated move attempts with negligible position delta
-  - [ ] Surface `stuck_suspected=true` and a reason
+- [x] Cap lists and sort nearby entities by distance (top N).
+- [x] Add derived fields needed for completion checks:
+  - [x] `self_guid` (top-level `Observation.self_guid`)
+  - [x] `self_pos` and `self_orient` (`Observation.self_state.pos`, `Observation.self_state.orient`)
+  - [x] `last_position_delta` (`Observation.derived.self_pos_delta` + `self_dist_moved`)
+  - [x] `client_correction_seen_recently` (`Observation.derived.client_correction_seen_recently`)
+- [x] Add stuck detection v0:
+  - [x] Count repeated move attempts with negligible position delta (`ObservationBuilder.stuck_frames`)
+  - [x] Surface `stuck_suspected=true` and a reason (`Observation.derived.stuck_reason`)
 
 ### 7) Goal System (High-Level Commands)
 - [ ] Add goal input:

@@ -19,7 +19,9 @@ use rusty_bot_core::agent::ToolInvocation as AgentToolInvocation;
 use rusty_bot_core::agent::game_api::GameApi as AgentGameApi;
 use rusty_bot_core::agent::r#loop::AgentLoop;
 use rusty_bot_core::agent::memory::{ToolResult as AgentToolResult, ToolStatus as AgentToolStatus};
-use rusty_bot_core::agent::observation::ObservationBuilder as AgentObservationBuilder;
+use rusty_bot_core::agent::observation::{
+    ObservationBuilder as AgentObservationBuilder, ObservationInputs as AgentObservationInputs,
+};
 use rusty_bot_core::agent::tools::ToolMeta;
 use rusty_bot_core::player::player_state::PlayerCurrentState;
 use rusty_bot_core::vision::generate_prompt as generate_vision_prompt;
@@ -1925,15 +1927,24 @@ impl AgentGameApi for ProxyAgentApi {
         >,
     > {
         Box::pin(async move {
-            let self_guid = self
-                .injection_guard
-                .lock()
-                .await
-                .last_self_guid
-                .unwrap_or(0);
+            let now = Instant::now();
+            let guard = self.injection_guard.lock().await;
+            let self_guid = guard.last_self_guid.unwrap_or(0);
+            let client_correction_seen_recently = guard
+                .last_client_correction_at
+                .map(|t| now.duration_since(t) < Duration::from_secs(2))
+                .unwrap_or(false);
+            drop(guard);
+
             let ws = self.world_state.lock().await;
             let mut b = self.observation_builder.lock().await;
-            Ok(b.build(&ws, self_guid))
+            Ok(b.build(
+                &ws,
+                AgentObservationInputs {
+                    self_guid,
+                    client_correction_seen_recently,
+                },
+            ))
         })
     }
 

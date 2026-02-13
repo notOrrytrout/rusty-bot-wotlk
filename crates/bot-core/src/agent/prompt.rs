@@ -26,11 +26,13 @@ pub fn build_control_prompt(
 ) -> String {
     let state = json!({
         "tick": obs.tick,
+        "self_guid": obs.self_guid,
         "self": obs.self_state,
         "npcs_nearby": obs.npcs_nearby,
         "players_nearby": obs.players_nearby,
         "chat_log": obs.chat_log,
         "combat_log": obs.combat_log,
+        "derived": obs.derived,
         "goal": mem.goal,
         "last_error": mem.last_error,
         "history": mem.history,
