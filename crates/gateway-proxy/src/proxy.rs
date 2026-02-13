@@ -1569,6 +1569,46 @@ mod llm_payload_tests {
     }
 }
 
+#[cfg(test)]
+mod injected_movement_observation_tests {
+    use super::*;
+    use crate::wotlk::movement::{MovementExtraFlags, MovementFlags, OrientedPoint3D, Point3D};
+
+    #[test]
+    fn apply_movement_observation_updates_player_pose() {
+        let mut ws = WorldState::new();
+        let guid = 123u64;
+
+        let mi = MovementInfo {
+            movement_flags: MovementFlags::FORWARD,
+            movement_extra_flags: MovementExtraFlags::NONE,
+            time: 42,
+            location: OrientedPoint3D {
+                point: Point3D {
+                    x: 1.0,
+                    y: 2.0,
+                    z: 3.0,
+                },
+                direction: 4.0,
+            },
+            transport: None,
+            pitch: None,
+            fall_time: 0,
+            jump_info: None,
+            spline_elevation: None,
+        };
+
+        apply_movement_observation_to_world(&mut ws, guid, &mi);
+        let p = ws.players.get(&guid).unwrap();
+        assert_eq!(p.position.x, 1.0);
+        assert_eq!(p.position.y, 2.0);
+        assert_eq!(p.position.z, 3.0);
+        assert_eq!(p.position.orientation, 4.0);
+        assert_eq!(p.movement_flags, MovementFlags::FORWARD.bits());
+        assert_eq!(p.timestamp, 42);
+    }
+}
+
 async fn record_client_movement_observation(
     packet: &WorldPacket,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
@@ -1593,16 +1633,7 @@ async fn record_client_movement_observation(
 
         {
             let mut ws = world_state.lock().await;
-            let player = ws
-                .players
-                .entry(guid.0)
-                .or_insert_with(|| PlayerCurrentState::new(guid.0));
-            player.position.x = movement_info.location.point.x;
-            player.position.y = movement_info.location.point.y;
-            player.position.z = movement_info.location.point.z;
-            player.position.orientation = movement_info.location.direction;
-            player.movement_flags = movement_info.movement_flags.bits();
-            player.timestamp = movement_info.time as u64;
+            apply_movement_observation_to_world(&mut ws, guid.0, &movement_info);
         }
 
         if let Some(demo_packet) = state.last_demo_packet.as_ref() {
@@ -1620,6 +1651,19 @@ async fn record_client_movement_observation(
         }
         state.last_client_move_time = Some(movement_info.time);
     }
+}
+
+fn apply_movement_observation_to_world(ws: &mut WorldState, guid: u64, mi: &MovementInfo) {
+    let player = ws
+        .players
+        .entry(guid)
+        .or_insert_with(|| PlayerCurrentState::new(guid));
+    player.position.x = mi.location.point.x;
+    player.position.y = mi.location.point.y;
+    player.position.z = mi.location.point.z;
+    player.position.orientation = mi.location.direction;
+    player.movement_flags = mi.movement_flags.bits();
+    player.timestamp = mi.time as u64;
 }
 
 async fn record_server_world_observation(
@@ -2167,7 +2211,20 @@ impl AgentGameApi for ProxyAgentApi {
             );
             for cmd in cmds {
                 match injector.inject_command(&cmd).await? {
-                    InjectCommandOutcome::Injected { .. } => {}
+                    InjectCommandOutcome::Injected { .. } => {
+                        // The server does not necessarily echo self-movement back quickly, and we do not
+                        // echo injected packets to the client (unsafe). To keep goal-follow/goto stable,
+                        // apply our own injected movement packet to the local WorldState snapshot.
+                        if let Some(pkt) = {
+                            let g = self.injection_guard.lock().await;
+                            g.last_demo_packet.clone()
+                        } {
+                            if let Ok((guid, mi)) = try_parse_movement_payload(&pkt.body) {
+                                let mut ws = self.world_state.lock().await;
+                                apply_movement_observation_to_world(&mut ws, guid.0, &mi);
+                            }
+                        }
+                    }
                     InjectCommandOutcome::Suppressed => {
                         return Ok(AgentToolResult {
                             status: AgentToolStatus::Retryable,
