@@ -7,9 +7,11 @@
 //! scaffolding (observation, memory, prompt building) that the proxy can use.
 
 pub mod executor;
+pub mod game_api;
 pub mod memory;
 pub mod observation;
 pub mod prompt;
+pub mod tools;
 mod wire;
 
 pub use wire::{

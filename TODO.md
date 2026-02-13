@@ -87,15 +87,16 @@ MVP high-level goals (first set to support end-to-end):
   - [x] `name` is validated against a closed set.
   - [x] `arguments` is a per-tool typed struct (v1 parses/validates per tool).
 - [ ] Define tool-result schema:
-  - [ ] `ToolResult { request_id, status: ok|failed|retryable, reason, facts }`
-  - [ ] `facts` is a small JSON map for next-turn context.
+  - [x] `ToolResult { status: ok|failed|retryable, reason, facts }` (request ids deferred).
+  - [x] `facts` is a small JSON map for next-turn context.
 - [ ] Define `Observation` schema (stable JSON; capped lists):
-  - [ ] Self state summary
-  - [ ] Nearby entities summary (top N by distance)
-  - [ ] Last chat lines (cap)
-  - [ ] Last combat lines (cap)
-  - [ ] Derived flags: `moving`, `in_combat` (placeholder until supported), `stuck_suspected`
-- [ ] Define a `GameApi` trait boundary (agent calls this; proxy implements it):
+  - [x] Self state summary
+  - [x] Nearby entities summary (top N by distance)
+  - [x] Last chat lines (cap)
+  - [x] Last combat lines (cap)
+  - [x] Derived flags: `moving`, `stuck_suspected` (and deltas for completion checks)
+  - [ ] Derived flags: `in_combat` (placeholder until supported)
+- [x] Define a `GameApi` trait boundary (agent calls this; proxy implements it):
   - [ ] “Inject action” surface (prefer high-level, not opcodes)
   - [ ] “Read observation inputs” surface (world snapshot)
 
@@ -109,15 +110,15 @@ Add a new module under:
   - [x] `ToolCall`
   - [x] `ToolResult` (type exists; wire-up to execution is next)
   - [x] `Executor` (scaffold exists)
-  - [ ] `GameApi` trait (defer until proxy integration step)
+  - [x] `GameApi` trait (trait exists; proxy integration will implement it)
 - [x] `observation.rs`:
   - [x] Build `Observation` from `WorldState` (v1).
-  - [ ] Derived facts (delta-based) needed for completion checks.
-- [ ] `tools.rs`:
+  - [x] Derived facts (delta-based) needed for completion checks (position + movement time deltas).
+- [x] `tools.rs`:
   - [ ] `Tool` trait + tool registry/dispatcher.
-  - [ ] Tool definitions for MVP movement set.
+  - [x] Tool definitions for MVP movement set (spec helpers: timeout + auto-stop).
 - [x] `executor.rs`:
-  - [ ] Action queue (1-step or N-step plan).
+  - [x] Action queue (single-step from LLM + auto-stop follow-up).
   - [x] Timeouts (scaffold).
   - [ ] Retry policy plumbing (max retries, backoff).
   - [ ] Mutual exclusion for continuous movement.

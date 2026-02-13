@@ -9,6 +9,24 @@ pub struct Vec3 {
     pub z: f32,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct DerivedFacts {
+    /// True if the current movement flags are non-zero.
+    pub moving: bool,
+    /// Change in position since the last observation frame (if available).
+    #[serde(default)]
+    pub self_pos_delta: Option<Vec3>,
+    /// Euclidean distance moved since the last observation frame (if available).
+    #[serde(default)]
+    pub self_dist_moved: Option<f32>,
+    /// Change in the client movement timestamp (if available).
+    #[serde(default)]
+    pub self_movement_time_delta: Option<i64>,
+    /// Placeholder for higher level stuck detection (executor will set this later).
+    #[serde(default)]
+    pub stuck_suspected: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct EntitySummary {
     pub guid: u64,
@@ -24,6 +42,8 @@ pub struct SelfSummary {
     pub guid: u64,
     pub pos: Vec3,
     pub orient: f32,
+    pub movement_flags: u32,
+    pub movement_time: u64,
     pub hp: (u32, u32),
     pub level: u8,
 }
@@ -40,6 +60,8 @@ pub struct Observation {
     pub chat_log: Vec<String>,
     #[serde(default)]
     pub combat_log: Vec<String>,
+    #[serde(default)]
+    pub derived: DerivedFacts,
 }
 
 fn dist_sq(a: &Vec3, b: &Vec3) -> f32 {
@@ -61,6 +83,8 @@ impl Observation {
                 z: p.position.z,
             },
             orient: p.position.orientation,
+            movement_flags: p.movement_flags,
+            movement_time: p.timestamp,
             hp: (p.health, p.max_health),
             level: p.level,
         });
@@ -121,7 +145,47 @@ impl Observation {
             players_nearby: others,
             chat_log: world.chat_log.iter().cloned().take(10).collect(),
             combat_log: world.combat_log.iter().cloned().take(10).collect(),
+            derived: DerivedFacts::default(),
         }
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ObservationBuilder {
+    last_self_pos: Option<Vec3>,
+    last_movement_time: Option<u64>,
+}
+
+impl ObservationBuilder {
+    pub fn build(&mut self, world: &WorldState, self_guid: u64) -> Observation {
+        let mut obs = Observation::from_world(world, self_guid);
+
+        if let Some(self_state) = obs.self_state.as_ref() {
+            obs.derived.moving = self_state.movement_flags != 0;
+
+            if let Some(prev_pos) = self.last_self_pos {
+                let delta = Vec3 {
+                    x: self_state.pos.x - prev_pos.x,
+                    y: self_state.pos.y - prev_pos.y,
+                    z: self_state.pos.z - prev_pos.z,
+                };
+                let dist = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+                obs.derived.self_pos_delta = Some(delta);
+                obs.derived.self_dist_moved = Some(dist);
+            }
+
+            if let Some(prev_time) = self.last_movement_time {
+                obs.derived.self_movement_time_delta =
+                    Some(self_state.movement_time as i64 - prev_time as i64);
+            }
+
+            self.last_self_pos = Some(self_state.pos);
+            self.last_movement_time = Some(self_state.movement_time);
+        } else {
+            self.last_self_pos = None;
+            self.last_movement_time = None;
+        }
+
+        obs
+    }
+}
