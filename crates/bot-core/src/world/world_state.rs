@@ -160,16 +160,23 @@ impl WorldState {
                             npc.set_fields(&mask, &values);
                         }
                         _ => {
-                            let other = self
-                                .other_players
+                            // Treat all non-player types as "NPC-like" for now so observation/goal
+                            // logic can navigate to them. This includes gameobjects (TYPEID_GAMEOBJECT=5),
+                            // dynamic objects, corpses, etc.
+                            let entry = entry_opt.unwrap_or(0);
+                            let npc = self
+                                .npcs
                                 .entry(guid)
-                                .or_insert_with(|| OtherPlayerState::new(guid));
-                            if let Some(mv) = movement {
-                                other.position = mv.pos;
-                                other.movement_flags = mv.movement_flags;
-                                other.timestamp = mv.timestamp as u64;
+                                .or_insert_with(|| NpcCurrentState::new(guid, entry));
+                            if npc.entry == 0 {
+                                npc.entry = entry;
                             }
-                            other.set_fields(&mask, &values);
+                            if let Some(mv) = movement {
+                                npc.position = mv.pos;
+                                npc.movement_flags = mv.movement_flags;
+                                npc.timestamp = mv.timestamp as u64;
+                            }
+                            npc.set_fields(&mask, &values);
                         }
                     }
                 }
@@ -691,5 +698,8 @@ mod tests {
         );
         let mut ws = WorldState::new();
         ws.apply_update_object(&payload).unwrap();
+        // TYPEID_GAMEOBJECT should be routed to npcs (NPC-like) so observation isn't misleading.
+        assert_eq!(ws.npcs.len(), 1);
+        assert!(ws.other_players.is_empty());
     }
 }
