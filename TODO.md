@@ -75,13 +75,11 @@ MVP high-level goals (first set to support end-to-end):
   - [x] `RUSTY_BOT_DEMO_SUPPRESS_CLIENT_MOVEMENT`
 
 ### 1) Contracts (Schemas + Interfaces)
-- [ ] Decide where the agent runs:
+- [x] Decide where the agent runs:
   - [x] In-proxy process (decision for v1).
-  - [ ] Separate runner process (defer until after tool + observation schema stabilizes).
 - [ ] Define the LLM output contract:
   - [x] Must emit exactly one `<tool_call>...</tool_call>` block and nothing else.
   - [x] The JSON inside must be an object: `{"name":"...","arguments":{...}}`.
-  - [ ] Future: add `schema_version` once we move past the demo tool set.
 - [ ] Define tool-call schema (Rust structs + serde):
   - [x] `ToolCallWire { name, arguments }` (wire format inside `<tool_call>`).
   - [x] `name` is validated against a closed set.
@@ -171,6 +169,10 @@ Acceptance checks
 ### Release Hygiene (Later)
 - [ ] Major release: default verbose proxy/agent debug logging OFF (make it opt-in via env/config); keep current defaults during active development.
 
+### Deferred / Later (Not Needed For MVP Loop Stability)
+- [ ] Separate runner process (proxy stays “dumb”, runner connects over control/IPC and drives it)
+- [ ] Add `schema_version` to the `<tool_call>` JSON once we move past the demo tool set
+
 ### 5) LLM Adapter Hardening (Parsing + Guardrails)
 - [x] Strict JSON parse of LLM output into `<tool_call>` -> `ToolInvocation` (validated).
 - [ ] On JSON parse failure:
@@ -195,26 +197,7 @@ Acceptance checks
   - [x] Count repeated move attempts with negligible position delta (`ObservationBuilder.stuck_frames`)
   - [x] Surface `stuck_suspected=true` and a reason (`Observation.derived.stuck_reason`)
 
-### 7) Goal System (High-Level Commands)
-- [ ] Add goal input:
-  - [ ] startup env var: `RUSTY_BOT_GOAL`
-  - [ ] runtime update (recommended): control port command
-- [ ] Define goal lifecycle states:
-  - [ ] `active`, `completed`, `blocked`, `aborted`
-- [ ] Add goal completion heuristics for the MVP goals.
-
-### 8) Control Port Upgrade (Optional but High Leverage)
-Current: raw `opcode_hex body_hex`.
-
-Add a JSON-lines control mode (keep old behavior for manual injection):
-- [ ] `{"cmd":"goal_set","goal":"..."}`
-- [ ] `{"cmd":"agent_pause"}` / `{"cmd":"agent_resume"}`
-- [ ] `{"cmd":"agent_status"}`
-
-Acceptance checks
-- [ ] Can query status without a debugger: current goal, last tool, last result, last error.
-
-### 9) Testing Harness (So We Can Move Fast Without Regressions)
+### 7) Testing Harness (So We Can Move Fast Without Regressions)
 - [ ] Unit tests in `rusty-bot-core`:
   - [ ] ToolCall JSON parsing and validation
   - [ ] Executor stop-after-continuous behavior
@@ -227,6 +210,25 @@ Acceptance checks
 Acceptance checks
 - [ ] `cargo test` workspace passes without a server or client running.
 - [ ] A test proves: invalid LLM output => zero injections executed.
+
+### 8) Goal System (High-Level Commands)
+- [ ] Add goal input:
+  - [ ] startup env var: `RUSTY_BOT_GOAL`
+  - [ ] runtime update (recommended): control port command
+- [ ] Define goal lifecycle states:
+  - [ ] `active`, `completed`, `blocked`, `aborted`
+- [ ] Add goal completion heuristics for the MVP goals.
+
+### 9) Control Port Upgrade (Optional but High Leverage)
+Current: raw `opcode_hex body_hex`.
+
+Add a JSON-lines control mode (keep old behavior for manual injection):
+- [ ] `{"cmd":"goal_set","goal":"..."}`
+- [ ] `{"cmd":"agent_pause"}` / `{"cmd":"agent_resume"}`
+- [ ] `{"cmd":"agent_status"}`
+
+Acceptance checks
+- [ ] Can query status without a debugger: current goal, last tool, last result, last error.
 
 ### 10) First Real Capabilities (After Framework Is Stable)
 These depend on new packet support + state tracking; keep them blocked until framework above is solid.
