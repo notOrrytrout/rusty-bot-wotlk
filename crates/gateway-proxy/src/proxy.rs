@@ -311,23 +311,22 @@ async fn send_injected_packet(
     downstream_tx: &mpsc::Sender<WorldPacket>,
     echo_to_client: bool,
 ) -> anyhow::Result<()> {
-    match route_for_opcode(packet.opcode) {
-        InjectRoute::UpstreamOnly => {
-            if echo_to_client {
-                if let Ok(op_u16) = u16::try_from(packet.opcode) {
-                    if is_world_move_opcode(op_u16) {
-                        upstream_tx.send(packet.clone()).await?;
-                        downstream_tx.send(packet).await?;
-                        return Ok(());
-                    }
-                }
-            }
-            upstream_tx.send(packet).await?;
-        }
-        InjectRoute::Both => {
+    // Echoing injected packets to the client is risky: the client expects server->client packets
+    // on that lane, and forwarding client->server opcodes can freeze/disconnect the client.
+    // Keep it opt-in for local experimentation only.
+    let unsafe_echo_to_client = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if matches!(route_for_opcode(packet.opcode), InjectRoute::UpstreamOnly) {
+        if echo_to_client && unsafe_echo_to_client {
+            // Historically used for demo/local testing. Do not enable in normal runs.
             upstream_tx.send(packet.clone()).await?;
             downstream_tx.send(packet).await?;
+            return Ok(());
         }
+        upstream_tx.send(packet).await?;
+        return Ok(());
     }
     Ok(())
 }
@@ -335,7 +334,6 @@ async fn send_injected_packet(
 #[derive(Debug, Clone, Copy)]
 enum InjectRoute {
     UpstreamOnly,
-    Both,
 }
 
 fn route_for_opcode(opcode: u32) -> InjectRoute {
@@ -349,9 +347,8 @@ fn route_for_opcode(opcode: u32) -> InjectRoute {
         }
     }
 
-    // Default: preserve legacy behavior (send to both directions). This is useful
-    // for manual testing via the control port.
-    InjectRoute::Both
+    // Default: injected packets should go upstream only. Echoing to the client is unsafe.
+    InjectRoute::UpstreamOnly
 }
 
 #[derive(Default, Debug)]
@@ -1226,20 +1223,17 @@ async fn serve_control(
                             Some(packet) => packet,
                             None => continue,
                         };
-                        match route_for_opcode(packet.opcode) {
-                            InjectRoute::UpstreamOnly => {
-                                if upstream.send(packet).await.is_err() {
-                                    break;
-                                }
-                            }
-                            InjectRoute::Both => {
-                                if upstream.send(packet.clone()).await.is_err() {
-                                    break;
-                                }
-                                if downstream.send(packet).await.is_err() {
-                                    break;
-                                }
-                            }
+                        if upstream.send(packet.clone()).await.is_err() {
+                            break;
+                        }
+
+                        // Opt-in only: raw control-port injection is already sharp; echoing it to the
+                        // client can freeze/disconnect the client.
+                        let unsafe_echo = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        if unsafe_echo {
+                            let _ = downstream.send(packet).await;
                         }
                     }
                     Err(err) => {
@@ -1434,7 +1428,7 @@ async fn run_demo_llm_injector(
     println!("proxy.bot.demo enabled endpoint={endpoint} model={model}");
     let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let injector = MovementTemplateInjector::new(
         upstream_tx.clone(),
@@ -2042,7 +2036,7 @@ async fn run_agent_llm_injector(
     let goal = std::env::var("RUSTY_BOT_GOAL").ok();
     let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+        .unwrap_or(false);
     let max_llm_calls_per_min: usize = std::env::var("RUSTY_BOT_LLM_MAX_CALLS_PER_MIN")
         .ok()
         .and_then(|v| v.parse().ok())
