@@ -83,7 +83,7 @@ pub struct RequestEmoteArgs {
     pub key: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum ToolCall {
     RequestIdle,
     RequestMove(RequestMoveArgs),
@@ -216,4 +216,3 @@ mod tests {
         assert!(format!("{err}").contains("key must be a single word"));
     }
 }
-

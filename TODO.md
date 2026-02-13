@@ -103,36 +103,36 @@ MVP high-level goals (first set to support end-to-end):
 Add a new module under:
 `crates/bot-core/src/agent/`
 
-- [ ] `mod.rs` exports:
+- [x] `mod.rs` exports:
   - [ ] `AgentLoop`
-  - [ ] `Observation`
-  - [ ] `ToolCall`
-  - [ ] `ToolResult`
-  - [ ] `Executor`
-  - [ ] `GameApi` trait (if we decide it belongs in bot-core)
-- [ ] `observation.rs`:
-  - [ ] Build `Observation` from `WorldState` + injection-guard state inputs we already have.
+  - [x] `Observation` (type exists; will expand as we add derived facts)
+  - [x] `ToolCall`
+  - [x] `ToolResult` (type exists; wire-up to execution is next)
+  - [x] `Executor` (scaffold exists)
+  - [ ] `GameApi` trait (defer until proxy integration step)
+- [x] `observation.rs`:
+  - [x] Build `Observation` from `WorldState` (v1).
   - [ ] Derived facts (delta-based) needed for completion checks.
 - [ ] `tools.rs`:
   - [ ] `Tool` trait + tool registry/dispatcher.
   - [ ] Tool definitions for MVP movement set.
-- [ ] `executor.rs`:
+- [x] `executor.rs`:
   - [ ] Action queue (1-step or N-step plan).
-  - [ ] Timeouts.
+  - [x] Timeouts (scaffold).
   - [ ] Retry policy plumbing (max retries, backoff).
   - [ ] Mutual exclusion for continuous movement.
   - [ ] Enforce “stop-after-continuous” even if the LLM forgets.
-- [ ] `prompt.rs`:
-  - [ ] Prompt builder using `Observation`, current goal, and allowed tool list.
-  - [ ] Hard “JSON only” formatting rules.
-  - [ ] Include last tool result to help the LLM iterate.
-- [ ] `memory.rs`:
-  - [ ] Short-term memory: last N tool calls/results; last error string.
-  - [ ] Current goal text and a goal id.
-- [ ] Wire into `crates/bot-core/src/lib.rs`.
+- [x] `prompt.rs`:
+  - [x] Prompt builder using `Observation`, current goal, and allowed tool list (v1).
+  - [ ] Hard “JSON only” formatting rules (needs to reflect `<tool_call>` contract, plus stricter guardrails).
+  - [x] Include last tool error + history to help the LLM iterate.
+- [x] `memory.rs`:
+  - [x] Short-term memory: last N tool calls/results; last error string.
+  - [ ] Current goal text and a goal id (goal text exists; goal id later).
+- [x] Wire into `crates/bot-core/src/lib.rs`.
 
 Acceptance checks
-- [ ] `cargo test -p rusty-bot-core` passes.
+- [x] `cargo test -p rusty-bot-core` passes.
 - [ ] Agent module does not depend on gateway-proxy crate types.
 
 ### 3) Tooling MVP (Start Small, Make It Reliable)
