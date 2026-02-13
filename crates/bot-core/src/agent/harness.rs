@@ -76,6 +76,26 @@ pub async fn tick(
     let obs = api.observe().await?;
     agent.memory.tick_goal_v0(&obs);
 
+    // Combat safety: if combat is detected while a continuous movement tool is active, preempt it
+    // with an immediate stop. This keeps the bot from endlessly running while taking damage.
+    if obs.derived.in_combat {
+        let should_stop = match &agent.executor.state {
+            super::executor::ExecutorState::Waiting { tool, .. } => matches!(
+                tool.call,
+                super::ToolCall::RequestMove(_) | super::ToolCall::RequestTurn(_)
+            ),
+            _ => false,
+        };
+        if should_stop {
+            agent.executor.offer_llm_tool(super::ToolInvocation {
+                call: super::ToolCall::RequestStop(super::wire::RequestStopArgs {
+                    kind: super::wire::StopKind::All,
+                }),
+                confirm: false,
+            });
+        }
+    }
+
     // Completion checks.
     if let Some((tool, result)) = agent.executor.tick_observation(&obs) {
         agent.memory.record(tool.clone(), result.clone());
@@ -383,6 +403,71 @@ mod tests {
                 kind: StopKind::Move
             })
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn harness_preempts_continuous_movement_when_in_combat() -> anyhow::Result<()> {
+        let api = Arc::new(FakeGameApi::default());
+        let llm = Arc::new(FakeLlm::default());
+        let mut agent = AgentLoop::new("system");
+
+        // Tick 1: offer move.
+        api.push_observation(base_obs(1));
+        llm.push_response(tool_call_move_forward(500));
+        let now = Instant::now();
+        let out = tick(
+            &mut agent,
+            api.as_ref(),
+            llm.as_ref(),
+            HarnessConfig::default(),
+            now,
+        )
+        .await?;
+        assert!(matches!(out, HarnessOutcome::Offered { .. }));
+
+        // Tick 2: execute move (continuous OK keeps waiting on observation).
+        api.push_observation(base_obs(2));
+        api.push_tool_result(ToolResult {
+            status: ToolStatus::Ok,
+            reason: "injected".to_string(),
+            facts: serde_json::Value::Null,
+        });
+        let out = tick(
+            &mut agent,
+            api.as_ref(),
+            llm.as_ref(),
+            HarnessConfig::default(),
+            now,
+        )
+        .await?;
+        assert!(matches!(out, HarnessOutcome::Executed { .. }));
+
+        // Tick 3: combat detected -> preempt move with a stop (no extra LLM poll).
+        let mut obs = base_obs(3);
+        obs.derived.in_combat = true;
+        api.push_observation(obs);
+        api.push_tool_result(ToolResult {
+            status: ToolStatus::Ok,
+            reason: "stopped".to_string(),
+            facts: serde_json::Value::Null,
+        });
+        let out = tick(
+            &mut agent,
+            api.as_ref(),
+            llm.as_ref(),
+            HarnessConfig::default(),
+            now,
+        )
+        .await?;
+        assert!(matches!(out, HarnessOutcome::Completed { .. }));
+        assert_eq!(llm.prompt_count(), 1);
+
+        let executed = api.executed_tools();
+        assert_eq!(executed.len(), 2);
+        assert!(matches!(executed[0].call, ToolCall::RequestMove(_)));
+        assert!(matches!(executed[1].call, ToolCall::RequestStop(_)));
 
         Ok(())
     }

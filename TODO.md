@@ -269,8 +269,8 @@ These depend on new packet support + state tracking; keep them blocked until fra
   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
   - [x] Proxy packet injection (v0) for `cast` implemented as `CMSG_ATTACKSWING` when `guid` is provided (`crates/gateway-proxy/src/proxy.rs`)
   - [x] `cast { slot, guid? }` (v0: implemented as attackswing; real cast/use-action is later)
-  - [ ] stop moving when combat detected
-  - [ ] detect “something happened” via combat log/state deltas
+  - [x] stop moving when combat detected (v0: preempt continuous movement when `derived.in_combat`)
+  - [x] detect “something happened” via combat log/state deltas (v0: `derived.in_combat`)
  - [ ] Loot v0 (requires state additions; define later)
 
 ---
