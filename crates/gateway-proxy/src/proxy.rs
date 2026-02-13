@@ -11,7 +11,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use rusty_bot_core::agent::ToolCall as AgentToolCall;
@@ -715,21 +715,30 @@ async fn handle_world_session(
         "proxy->client",
     ));
 
+    let agent_enabled = std::env::var("RUSTY_BOT_AGENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let (agent_tx, agent_rx) = if agent_enabled {
+        let (tx, rx) = mpsc::channel::<AgentControlCommand>(32);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     let control_task = tokio::spawn(serve_control(
         control_listener,
         upstream_tx.clone(),
         downstream_inject_tx.clone(),
         injection_guard.clone(),
+        agent_tx.clone(),
     ));
-    let agent_enabled = std::env::var("RUSTY_BOT_AGENT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
     let demo_task = if agent_enabled {
         tokio::spawn(run_agent_llm_injector(
             upstream_tx.clone(),
             downstream_inject_tx.clone(),
             injection_guard.clone(),
             world_state.clone(),
+            agent_rx.expect("agent_rx"),
         ))
     } else {
         tokio::spawn(run_demo_llm_injector(
@@ -1200,11 +1209,72 @@ fn hex_all(bytes: &[u8]) -> String {
         .join("")
 }
 
+#[derive(Debug)]
+enum AgentControlCommand {
+    Enable(bool),
+    SetGoal(String),
+    ClearGoal,
+    Status {
+        reply: oneshot::Sender<serde_json::Value>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum ControlRequest {
+    /// Structured wrapper around the existing raw injection control port.
+    Inject {
+        opcode: String,
+        body_hex: String,
+    },
+    /// Enable/disable the in-proxy agent loop (independent of the demo injector).
+    AgentEnable {
+        enabled: bool,
+    },
+    SetGoal {
+        goal: String,
+    },
+    ClearGoal {},
+    Status {},
+}
+
+#[derive(Debug)]
+enum ControlInput {
+    Legacy(WorldPacket),
+    Json(ControlRequest),
+}
+
+fn parse_opcode_u16(opcode: &str) -> anyhow::Result<u16> {
+    let opcode = opcode.trim();
+    if let Some(hex) = opcode
+        .strip_prefix("0x")
+        .or_else(|| opcode.strip_prefix("0X"))
+    {
+        return Ok(
+            u16::from_str_radix(hex, 16).with_context(|| format!("invalid opcode hex {opcode}"))?
+        );
+    }
+    Ok(opcode
+        .parse::<u16>()
+        .with_context(|| format!("invalid opcode {opcode}"))?)
+}
+
+fn parse_control_input_line(line: &str) -> anyhow::Result<ControlInput> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('{') {
+        let req: ControlRequest =
+            serde_json::from_str(trimmed).with_context(|| "invalid json control request")?;
+        return Ok(ControlInput::Json(req));
+    }
+    Ok(ControlInput::Legacy(parse_control_line(trimmed)?))
+}
+
 async fn serve_control(
     listener: Arc<TcpListener>,
     upstream_tx: mpsc::Sender<WorldPacket>,
     downstream_tx: mpsc::Sender<WorldPacket>,
     injection_guard: Arc<Mutex<InjectionGuardState>>,
+    agent_tx: Option<mpsc::Sender<AgentControlCommand>>,
 ) -> anyhow::Result<()> {
     loop {
         let (socket, addr) = listener.accept().await?;
@@ -1213,16 +1283,36 @@ async fn serve_control(
         let upstream = upstream_tx.clone();
         let downstream = downstream_tx.clone();
         let guard = injection_guard.clone();
+        let agent_tx = agent_tx.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(socket).lines();
+            let (read, mut write) = tokio::io::split(socket);
+            let mut lines = BufReader::new(read).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
 
-                match parse_control_line(trimmed) {
-                    Ok(packet) => {
+                let input = match parse_control_input_line(trimmed) {
+                    Ok(input) => input,
+                    Err(err) => {
+                        eprintln!("proxy.control.bad_line error={err:#} line={trimmed}");
+                        let _ = write
+                            .write_all(
+                                format!(
+                                    "{{\"ok\":false,\"error\":{}}}\n",
+                                    serde_json::to_string(&format!("{err:#}"))
+                                        .unwrap_or("\"error\"".to_string())
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                match input {
+                    ControlInput::Legacy(packet) => {
                         let packet = match apply_injection_guard(packet, &guard).await {
                             Some(packet) => packet,
                             None => continue,
@@ -1240,12 +1330,109 @@ async fn serve_control(
                             let _ = downstream.send(packet).await;
                         }
                     }
-                    Err(err) => {
-                        eprintln!("proxy.control.bad_line error={err} line={trimmed}");
+                    ControlInput::Json(req) => {
+                        let reply = handle_control_json(
+                            req,
+                            &upstream,
+                            &downstream,
+                            &guard,
+                            agent_tx.as_ref(),
+                        )
+                        .await;
+                        match reply {
+                            Ok(value) => {
+                                let line = format!("{}\n", value);
+                                let _ = write.write_all(line.as_bytes()).await;
+                            }
+                            Err(err) => {
+                                let line = format!(
+                                    "{{\"ok\":false,\"error\":{}}}\n",
+                                    serde_json::to_string(&format!("{err:#}"))
+                                        .unwrap_or("\"error\"".to_string())
+                                );
+                                let _ = write.write_all(line.as_bytes()).await;
+                            }
+                        }
                     }
                 }
             }
         });
+    }
+}
+
+async fn handle_control_json(
+    req: ControlRequest,
+    upstream: &mpsc::Sender<WorldPacket>,
+    downstream: &mpsc::Sender<WorldPacket>,
+    injection_guard: &Arc<Mutex<InjectionGuardState>>,
+    agent_tx: Option<&mpsc::Sender<AgentControlCommand>>,
+) -> anyhow::Result<String> {
+    match req {
+        ControlRequest::Inject { opcode, body_hex } => {
+            let opcode = parse_opcode_u16(&opcode)? as u32;
+            let body = decode_hex(&body_hex)?;
+            let packet = WorldPacket { opcode, body };
+
+            let packet = apply_injection_guard(packet, injection_guard)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("suppressed"))?;
+            upstream
+                .send(packet.clone())
+                .await
+                .map_err(|_| anyhow::anyhow!("upstream channel closed"))?;
+
+            let unsafe_echo = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if unsafe_echo {
+                let _ = downstream.send(packet).await;
+            }
+
+            Ok(serde_json::json!({ "ok": true, "op": "inject" }).to_string())
+        }
+        ControlRequest::AgentEnable { enabled } => {
+            let Some(tx) = agent_tx else {
+                anyhow::bail!("agent_control_unavailable");
+            };
+            tx.send(AgentControlCommand::Enable(enabled))
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
+            Ok(
+                serde_json::json!({ "ok": true, "op": "agent_enable", "enabled": enabled })
+                    .to_string(),
+            )
+        }
+        ControlRequest::SetGoal { goal } => {
+            let Some(tx) = agent_tx else {
+                anyhow::bail!("agent_control_unavailable");
+            };
+            tx.send(AgentControlCommand::SetGoal(goal.clone()))
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
+            Ok(serde_json::json!({ "ok": true, "op": "set_goal" }).to_string())
+        }
+        ControlRequest::ClearGoal {} => {
+            let Some(tx) = agent_tx else {
+                anyhow::bail!("agent_control_unavailable");
+            };
+            tx.send(AgentControlCommand::ClearGoal)
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
+            Ok(serde_json::json!({ "ok": true, "op": "clear_goal" }).to_string())
+        }
+        ControlRequest::Status {} => {
+            let Some(tx) = agent_tx else {
+                anyhow::bail!("agent_control_unavailable");
+            };
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(AgentControlCommand::Status { reply: reply_tx })
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
+            let v = reply_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_status_reply_dropped"))?;
+            Ok(v.to_string())
+        }
     }
 }
 
@@ -1265,6 +1452,44 @@ fn parse_control_line(line: &str) -> anyhow::Result<WorldPacket> {
         opcode: opcode as u32,
         body,
     })
+}
+
+#[cfg(test)]
+mod control_port_tests {
+    use super::*;
+
+    #[test]
+    fn opcode_parser_accepts_hex_and_decimal() {
+        assert_eq!(parse_opcode_u16("0x00a9").unwrap(), 0x00A9);
+        assert_eq!(parse_opcode_u16("169").unwrap(), 169);
+    }
+
+    #[test]
+    fn parse_control_input_line_json_and_legacy() {
+        let json = r#"{"op":"status"}"#;
+        let input = parse_control_input_line(json).unwrap();
+        assert!(matches!(
+            input,
+            ControlInput::Json(ControlRequest::Status {})
+        ));
+
+        let legacy = "0x00a9 deadbeef";
+        let input = parse_control_input_line(legacy).unwrap();
+        assert!(matches!(input, ControlInput::Legacy(_)));
+    }
+
+    #[test]
+    fn parse_control_input_line_inject_json_round_trips_packet_fields() {
+        let json = r#"{"op":"inject","opcode":"0x0001","body_hex":"deadbeef"}"#;
+        let input = parse_control_input_line(json).unwrap();
+        match input {
+            ControlInput::Json(ControlRequest::Inject { opcode, body_hex }) => {
+                assert_eq!(parse_opcode_u16(&opcode).unwrap(), 1);
+                assert_eq!(decode_hex(&body_hex).unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+            }
+            other => panic!("unexpected input: {other:?}"),
+        }
+    }
 }
 
 async fn record_client_movement_observation(
@@ -2097,14 +2322,11 @@ async fn run_agent_llm_injector(
     downstream_tx: mpsc::Sender<WorldPacket>,
     injection_guard: Arc<Mutex<InjectionGuardState>>,
     world_state: Arc<Mutex<WorldState>>,
+    mut control_rx: mpsc::Receiver<AgentControlCommand>,
 ) -> anyhow::Result<()> {
-    let enabled = std::env::var("RUSTY_BOT_DEMO")
+    let start_enabled = std::env::var("RUSTY_BOT_DEMO")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    if !enabled {
-        println!("proxy.bot.agent disabled");
-        return Ok(());
-    }
 
     let endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:11435/api/generate".to_string());
@@ -2129,7 +2351,10 @@ async fn run_agent_llm_injector(
         .and_then(|v| v.parse().ok())
         .unwrap_or(25);
 
-    println!("proxy.bot.agent enabled endpoint={endpoint} model={model} use_vision={use_vision}");
+    println!(
+        "proxy.bot.agent started enabled={} endpoint={} model={} use_vision={}",
+        start_enabled, endpoint, model, use_vision
+    );
 
     let limiter = Arc::new(Mutex::new(RateLimiter::new(
         max_llm_calls_per_min,
@@ -2161,71 +2386,138 @@ async fn run_agent_llm_injector(
     if let Some(goal) = goal {
         agent.memory.set_goal(goal);
     }
+    let mut enabled = start_enabled;
 
     loop {
-        tick.tick().await;
-
-        let prompt_suffix = if use_vision {
-            let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
-            let ws = world_state.lock().await;
-            let vision = generate_vision_prompt(&ws, guid);
-            Some(format!("\n[LEGACY_VISION]\n{vision}"))
-        } else {
-            None
-        };
-
-        let cfg = AgentHarnessConfig {
-            enable_repair: true,
-            prompt_suffix,
-        };
-
-        let now = std::time::Instant::now();
-        let out = agent_tick(&mut agent, &api, &llm, cfg, now).await;
-        match out {
-            Ok(AgentHarnessOutcome::Completed { tool, result }) => {
-                println!(
-                    "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
-                    result.status, result.reason
-                );
-            }
-            Ok(AgentHarnessOutcome::Executed { .. })
-            | Ok(AgentHarnessOutcome::Offered { .. })
-            | Ok(AgentHarnessOutcome::Observed) => {}
-            Err(err) => {
-                if err.is::<LlmPollFailed>() {
-                    eprintln!("proxy.bot.agent poll_failed error={err:#}");
-                    // When the LLM is down, do not keep issuing movement. Prefer hard stops.
-                    for stop in [
-                        AgentToolInvocation {
-                            call: AgentToolCall::RequestStop(
-                                rusty_bot_core::agent::wire::RequestStopArgs {
-                                    kind: rusty_bot_core::agent::wire::StopKind::Turn,
-                                },
-                            ),
-                            confirm: false,
-                        },
-                        AgentToolInvocation {
-                            call: AgentToolCall::RequestStop(
-                                rusty_bot_core::agent::wire::RequestStopArgs {
-                                    kind: rusty_bot_core::agent::wire::StopKind::Strafe,
-                                },
-                            ),
-                            confirm: false,
-                        },
-                        AgentToolInvocation {
-                            call: AgentToolCall::RequestStop(
-                                rusty_bot_core::agent::wire::RequestStopArgs {
-                                    kind: rusty_bot_core::agent::wire::StopKind::Move,
-                                },
-                            ),
-                            confirm: false,
-                        },
-                    ] {
-                        let _ = api.execute_tool(stop).await;
-                    }
+        tokio::select! {
+            _ = tick.tick() => {
+                if !enabled {
                     continue;
                 }
-                return Err(err);
+
+                let prompt_suffix = if use_vision {
+                    let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
+                    let ws = world_state.lock().await;
+                    let vision = generate_vision_prompt(&ws, guid);
+                    Some(format!("\n[LEGACY_VISION]\n{vision}"))
+                } else {
+                    None
+                };
+
+                let cfg = AgentHarnessConfig {
+                    enable_repair: true,
+                    prompt_suffix,
+                };
+
+                let now = std::time::Instant::now();
+                let out = agent_tick(&mut agent, &api, &llm, cfg, now).await;
+                match out {
+                    Ok(AgentHarnessOutcome::Completed { tool, result }) => {
+                        println!(
+                            "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
+                            result.status, result.reason
+                        );
+                    }
+                    Ok(AgentHarnessOutcome::Executed { .. })
+                    | Ok(AgentHarnessOutcome::Offered { .. })
+                    | Ok(AgentHarnessOutcome::Observed) => {}
+                    Err(err) => {
+                        if err.is::<LlmPollFailed>() {
+                            eprintln!("proxy.bot.agent poll_failed error={err:#}");
+                            // When the LLM is down, do not keep issuing movement. Prefer hard stops.
+                            for stop in [
+                                AgentToolInvocation {
+                                    call: AgentToolCall::RequestStop(
+                                        rusty_bot_core::agent::wire::RequestStopArgs {
+                                            kind: rusty_bot_core::agent::wire::StopKind::Turn,
+                                        },
+                                    ),
+                                    confirm: false,
+                                },
+                                AgentToolInvocation {
+                                    call: AgentToolCall::RequestStop(
+                                        rusty_bot_core::agent::wire::RequestStopArgs {
+                                            kind: rusty_bot_core::agent::wire::StopKind::Strafe,
+                                        },
+                                    ),
+                                    confirm: false,
+                                },
+                                AgentToolInvocation {
+                                    call: AgentToolCall::RequestStop(
+                                        rusty_bot_core::agent::wire::RequestStopArgs {
+                                            kind: rusty_bot_core::agent::wire::StopKind::Move,
+                                        },
+                                    ),
+                                    confirm: false,
+                                },
+                            ] {
+                                let _ = api.execute_tool(stop).await;
+                            }
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+            cmd = control_rx.recv() => {
+                let Some(cmd) = cmd else {
+                    // Control channel closed; keep running.
+                    continue;
+                };
+                match cmd {
+                    AgentControlCommand::Enable(next) => {
+                        enabled = next;
+                        if !enabled {
+                            // Stop any continuous inputs immediately, then reset executor state so we don't
+                            // restart a queued action if re-enabled later.
+                            for stop in [
+                                AgentToolInvocation {
+                                    call: AgentToolCall::RequestStop(
+                                        rusty_bot_core::agent::wire::RequestStopArgs {
+                                            kind: rusty_bot_core::agent::wire::StopKind::Turn,
+                                        },
+                                    ),
+                                    confirm: false,
+                                },
+                                AgentToolInvocation {
+                                    call: AgentToolCall::RequestStop(
+                                        rusty_bot_core::agent::wire::RequestStopArgs {
+                                            kind: rusty_bot_core::agent::wire::StopKind::Strafe,
+                                        },
+                                    ),
+                                    confirm: false,
+                                },
+                                AgentToolInvocation {
+                                    call: AgentToolCall::RequestStop(
+                                        rusty_bot_core::agent::wire::RequestStopArgs {
+                                            kind: rusty_bot_core::agent::wire::StopKind::Move,
+                                        },
+                                    ),
+                                    confirm: false,
+                                },
+                            ] {
+                                let _ = api.execute_tool(stop).await;
+                            }
+                            agent.executor = rusty_bot_core::agent::executor::Executor::default();
+                        }
+                    }
+                    AgentControlCommand::SetGoal(goal) => {
+                        agent.memory.set_goal(goal);
+                    }
+                    AgentControlCommand::ClearGoal => {
+                        agent.memory.clear_goal();
+                    }
+                    AgentControlCommand::Status { reply } => {
+                        let _ = reply.send(serde_json::json!({
+                            "ok": true,
+                            "enabled": enabled,
+                            "goal": agent.memory.goal.clone(),
+                            "last_error": agent.memory.last_error.clone(),
+                            "executor_state": format!("{:?}", agent.executor.state),
+                            "history_len": agent.memory.history.len(),
+                        }));
+                    }
+                }
             }
         }
     }
