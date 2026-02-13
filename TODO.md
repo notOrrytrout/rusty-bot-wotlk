@@ -44,6 +44,13 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 
 ---
 
+## Needs Attention (Repo Hygiene / Docs)
+
+- [x] Fix/replace stale crate-level README: `crates/bot-core/README.md` currently describes a different project (AzerothClient), incorrect license, and features not present in this repo.
+- [x] Decide what to do with stray/duplicate file `crates/bot-core/Cargo copy.toml` (appears to be an accidental duplicate; delete or document why it exists).
+
+---
+
 ## Definitions (What We Are Building Next)
 
 Guiding principle: the LLM chooses *high-level* tool calls; Rust code provides reliability (validation, execution, timeouts, completion checks, retries, safety rails).
@@ -63,27 +70,31 @@ MVP high-level goals (first set to support end-to-end):
 - [x] Run `cargo test` at workspace root and record current state (pass/fail) in this file under “Notes”.
 - [x] Add a single command to run the proxy demo in one line (document only; no code change needed yet):
   - [x] `bash scripts/run_runner_with_mock.sh`
-- [x] Inventory runtime env vars currently used (documented from code):
+- [x] Inventory runtime env vars currently used (from code + scripts):
   - [x] `RUSTY_BOT_CONFIG_DIR`
   - [x] `RUSTY_BOT_AGENT_ENABLED`
-  - [x] `RUSTY_BOT_REAL_CLIENT`
+  - [x] `RUSTY_BOT_REAL_CLIENT` (scripts only; not read by proxy code)
   - [x] `RUSTY_BOT_LLM_ENDPOINT`
   - [x] `RUSTY_BOT_LLM_MODEL`
+  - [x] `RUSTY_BOT_LLM_SYSTEM_PROMPT`
   - [x] `RUSTY_BOT_AGENT_USE_VISION`
+  - [x] `RUSTY_BOT_GOAL`
+  - [x] `RUSTY_BOT_LLM_MAX_CALLS_PER_MIN`
+  - [x] `RUSTY_BOT_INJECT_MAX_PER_SEC`
   - [x] `RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT`
   - [x] `RUSTY_BOT_SUPPRESS_CLIENT_MOVEMENT`
 
 ### 1) Contracts (Schemas + Interfaces)
 - [x] Decide where the agent runs:
   - [x] In-proxy process (decision for v1).
-- [ ] Define the LLM output contract:
+- [x] Define the LLM output contract:
   - [x] Must emit exactly one `<tool_call>...</tool_call>` block and nothing else.
   - [x] The JSON inside must be an object: `{"name":"...","arguments":{...}}`.
-- [ ] Define tool-call schema (Rust structs + serde):
+- [x] Define tool-call schema (Rust structs + serde):
   - [x] `ToolCallWire { name, arguments }` (wire format inside `<tool_call>`).
   - [x] `name` is validated against a closed set.
   - [x] `arguments` is a per-tool typed struct (v1 parses/validates per tool).
-- [ ] Define tool-result schema:
+- [x] Define tool-result schema:
   - [x] `ToolResult { status: ok|failed|retryable, reason, facts }` (request ids deferred).
   - [x] `facts` is a small JSON map for next-turn context.
 - [ ] Define `Observation` schema (stable JSON; capped lists):
@@ -118,11 +129,11 @@ Add a new module under:
   - [x] Action queue (single-step from LLM + auto-stop follow-up).
   - [x] Timeouts (scaffold).
   - [x] Retry policy plumbing (max retries, backoff).
-  - [ ] Mutual exclusion for continuous movement (or prove it’s already impossible by construction).
+  - [x] Mutual exclusion for continuous movement (continuous tools are preempted with a stop-first).
   - [x] Enforce “stop-after-continuous” even if the LLM forgets.
 - [x] `prompt.rs`:
   - [x] Prompt builder using `Observation`, current goal, and allowed tool list (v1).
-  - [ ] Hard “JSON only” formatting rules (needs to reflect `<tool_call>` contract, plus stricter guardrails).
+  - [x] Hard “JSON only” formatting rules (explicit `<tool_call>` contract; no markdown/code fences).
   - [x] Include last tool error + history to help the LLM iterate.
 - [x] `memory.rs`:
   - [x] Short-term memory: last N tool calls/results; last error string.
@@ -131,7 +142,7 @@ Add a new module under:
 
 Acceptance checks
 - [x] `cargo test -p rusty-bot-core` passes.
-- [ ] Agent module does not depend on gateway-proxy crate types.
+- [x] Agent module does not depend on gateway-proxy crate types.
 
 ### 3) Tooling MVP (Start Small, Make It Reliable)
 Initial tool set (based on what demo supports today):
@@ -201,7 +212,7 @@ Acceptance checks
   - [x] ToolCall JSON parsing and validation (`crates/bot-core/src/agent/wire.rs`)
   - [x] Executor stop-after-continuous behavior (`crates/bot-core/src/agent/executor.rs`)
   - [x] Retry/backoff logic (`crates/bot-core/src/agent/executor.rs`)
-  - [ ] Prompt builder includes tool list + “JSON only” (prompt snapshots still TBD)
+  - [x] Prompt builder includes tool list + “JSON only” (snapshot tests still TBD)
 - [x] Add a “dry run” fake `GameApi` for deterministic integration tests:
   - [x] Record tool executions (`crates/bot-core/src/agent/harness.rs`)
   - [x] Simulate observation deltas and timeouts (`crates/bot-core/src/agent/harness.rs`)
@@ -211,7 +222,7 @@ Acceptance checks
 - [x] A test proves: invalid LLM output => zero injections executed. (`crates/bot-core/src/agent/harness.rs`)
 
 ### 8) Goal System (High-Level Commands)
-- [ ] Add goal input:
+- [x] Add goal input:
   - [x] startup env var: `RUSTY_BOT_GOAL`
   - [x] runtime update (recommended): control port command (`crates/gateway-proxy/src/proxy.rs`)
 - [ ] Define goal lifecycle states:
@@ -225,15 +236,16 @@ Add a JSON-lines control mode (keep old behavior for manual injection):
 - [x] Define control protocol schema (`serde` enums)
 - [x] Implement JSON parsing (NDJSON, one JSON object per line)
 - [x] Reject invalid control messages (reply `{"ok":false,"error":"..."}`)
-- [ ] Add `version` field for protocol
+- [x] Add `version` field for protocol (optional; defaults to v1 if omitted)
 
 Agent controls:
 - [x] Pause/resume agent loop (`{"op":"agent_enable","enabled":false|true}`)
 - [x] Set/clear goal (`{"op":"set_goal","goal":"..."}`, `{"op":"clear_goal"}`)
 - [x] Query status (`{"op":"status"}` includes goal + last_error + executor_state)
 - [x] Force emergency stop (disable agent sends stop packets)
-- [ ] Inject manual *tool call* (not raw packet injection)
-- [ ] Query current observation snapshot
+- [x] Inject manual *tool call* (not raw packet injection) (`{"op":"tool","tool":{...}}`)
+- [x] Execute a discrete tool immediately (bypasses executor loop) (`{"op":"tool_execute","tool":{...}}`)
+- [x] Query current observation snapshot (`{"op":"observation"}`)
 
 Raw injection (existing + kept):
 - [x] Inject raw packet via JSON wrapper (`{"op":"inject","opcode":"0x....","body_hex":"..."}`) or legacy `opcode_hex body_hex`
