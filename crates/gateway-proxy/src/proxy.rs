@@ -2112,16 +2112,19 @@ async fn run_agent_llm_injector(
         }
 
         // Execute any queued tools (e.g. auto-stop) before polling the LLM.
+        agent.executor.tick_backoff(std::time::Instant::now());
         if let Some(tool) = agent.executor.next_to_execute() {
+            let now = std::time::Instant::now();
+            agent.executor.start(tool.clone(), now);
             let inject_res = api.execute_tool(tool.clone()).await?;
-            if tool.is_continuous() {
-                if inject_res.status == AgentToolStatus::Ok {
-                    agent.executor.start(tool, std::time::Instant::now());
-                } else {
-                    agent.memory.record(tool, inject_res);
-                }
-            } else {
-                agent.memory.record(tool, inject_res);
+
+            // Continuous tools run until observation/timeouts say they're complete.
+            if tool.is_continuous() && inject_res.status == AgentToolStatus::Ok {
+                continue;
+            }
+
+            if let Some((done_tool, done_res)) = agent.executor.complete(now, inject_res) {
+                agent.memory.record(done_tool, done_res);
             }
             continue;
         }

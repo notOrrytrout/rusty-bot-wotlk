@@ -118,7 +118,7 @@ Add a new module under:
 - [x] `executor.rs`:
   - [x] Action queue (single-step from LLM + auto-stop follow-up).
   - [x] Timeouts (scaffold).
-  - [ ] Retry policy plumbing (max retries, backoff).
+  - [x] Retry policy plumbing (max retries, backoff).
   - [ ] Mutual exclusion for continuous movement (or prove it’s already impossible by construction).
   - [x] Enforce “stop-after-continuous” even if the LLM forgets.
 - [x] `prompt.rs`:
@@ -143,9 +143,9 @@ Initial tool set (based on what demo supports today):
 - [x] `request_emote { key }`
 
 For each tool:
-- [x] Validate args strictly (reject unknown enums, clamp duration ranges).
-- [x] Define completion logic (timeout + minimal observation deltas).
-- [ ] Define retry policy.
+  - [x] Validate args strictly (reject unknown enums, clamp duration ranges).
+  - [x] Define completion logic (timeout + minimal observation deltas).
+  - [x] Define retry policy (executor backoff for `Retryable` results).
 
 Acceptance checks
 - [x] Continuous tools never leave the character “stuck turning/running” if the LLM hangs (executor must auto-stop).
