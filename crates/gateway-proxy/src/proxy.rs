@@ -724,11 +724,14 @@ async fn read_client_world_packets(
         record_auth_boundary_observation(lane, packet_count, packet.opcode, &auth_boundary).await;
         maybe_rewrite_client_auth_session(&mut packet, lane, &auth_rewrite).await;
 
-        // Any packet from the real client counts as "human activity". We use this to temporarily
-        // pause the agent loop so the player can take over without fighting injections.
-        {
-            let mut state = injection_guard.lock().await;
-            state.last_human_action_at = Some(Instant::now());
+        // Human override: only treat *movement* packets as "human is actively driving".
+        // The WoW client sends many other client->server packets periodically (time sync, keepalives,
+        // etc). Counting all packets would keep the override permanently active and block the agent.
+        if let Ok(op_u16) = u16::try_from(packet.opcode) {
+            if is_world_move_opcode(op_u16) {
+                let mut state = injection_guard.lock().await;
+                state.last_human_action_at = Some(Instant::now());
+            }
         }
 
         record_client_movement_observation(&packet, &injection_guard, &world_state).await;
