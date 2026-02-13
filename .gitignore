@@ -3,3 +3,5 @@
 *.log
 /tmp
 *.lock
+__pycache__/
+*.pyc
