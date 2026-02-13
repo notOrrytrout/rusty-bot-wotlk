@@ -1217,6 +1217,10 @@ enum AgentControlCommand {
     SetGoal(String),
     ClearGoal,
     OfferTool(AgentToolInvocation),
+    ExecuteTool {
+        tool: AgentToolInvocation,
+        reply: oneshot::Sender<AgentToolResult>,
+    },
     Status {
         reply: oneshot::Sender<serde_json::Value>,
     },
@@ -1243,6 +1247,9 @@ enum ControlRequest {
     Status {},
     Observation {},
     Tool {
+        tool: AgentToolCallWire,
+    },
+    ToolExecute {
         tool: AgentToolCallWire,
     },
 }
@@ -1506,6 +1513,32 @@ async fn handle_control_json(
                 .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
             Ok(serde_json::json!({ "ok": true, "op": "tool" }).to_string())
         }
+        ControlRequest::ToolExecute { tool } => {
+            let Some(tx) = agent_tx else {
+                anyhow::bail!("agent_control_unavailable");
+            };
+            let inv = AgentToolInvocation::try_from(tool)
+                .map_err(|e| anyhow::anyhow!("invalid tool: {e}"))?;
+
+            // Immediate execution is intended for safe discrete actions (stop/idle/jump/emote).
+            // Continuous movement should go through the normal executor loop.
+            if inv.is_continuous() {
+                anyhow::bail!("tool_execute does not support continuous tools");
+            }
+
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(AgentControlCommand::ExecuteTool {
+                tool: inv,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
+
+            let res = reply_rx
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_execute_reply_dropped"))?;
+            Ok(serde_json::json!({ "ok": true, "op": "tool_execute", "result": res }).to_string())
+        }
     }
 }
 
@@ -1581,6 +1614,16 @@ mod control_port_tests {
         assert!(matches!(
             input,
             ControlInput::Json(ControlRequest::Tool { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_control_input_line_tool_execute_json() {
+        let json = r#"{"op":"tool_execute","tool":{"name":"request_idle","arguments":{}}}"#;
+        let input = parse_control_input_line(json).unwrap();
+        assert!(matches!(
+            input,
+            ControlInput::Json(ControlRequest::ToolExecute { .. })
         ));
     }
 }
@@ -2602,6 +2645,27 @@ async fn run_agent_llm_injector(
                     }
                     AgentControlCommand::OfferTool(tool) => {
                         agent.executor.offer_llm_tool(tool);
+                    }
+                    AgentControlCommand::ExecuteTool { tool, reply } => {
+                        let mut res = match api.execute_tool(tool.clone()).await {
+                            Ok(res) => res,
+                            Err(err) => AgentToolResult {
+                                status: AgentToolStatus::Failed,
+                                reason: format!("execute_failed: {err:#}"),
+                                facts: serde_json::Value::Null,
+                            },
+                        };
+
+                        // Record it for visibility/debugging; these are still "actions taken".
+                        agent.memory.record(tool, res.clone());
+
+                        // For discrete tools, treat retryable as failed; there is no executor retry path here.
+                        if res.status == AgentToolStatus::Retryable {
+                            res.status = AgentToolStatus::Failed;
+                            res.reason = format!("retryable_in_tool_execute: {}", res.reason);
+                        }
+
+                        let _ = reply.send(res);
                     }
                     AgentControlCommand::Status { reply } => {
                         let _ = reply.send(serde_json::json!({
