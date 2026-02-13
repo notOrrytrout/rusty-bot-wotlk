@@ -59,80 +59,81 @@ MVP high-level goals (first set to support end-to-end):
 ## Roadmap: Agent Framework (Detailed To-Do)
 
 ### 0) Baseline (Prep)
-- [ ] Create branch `local/agent-framework`.
-- [ ] Run `cargo test` at workspace root and record current state (pass/fail) in this file under “Notes”.
-- [ ] Add a single command to run the proxy demo in one line (document only; no code change needed yet):
-  - [ ] `bash scripts/run_runner_with_mock.sh`
-- [ ] Inventory runtime env vars currently used by the demo loop (documented from code):
-  - [ ] `RUSTY_BOT_CONFIG_DIR`
-  - [ ] `RUSTY_BOT_DEMO`
-  - [ ] `RUSTY_BOT_REAL_CLIENT`
-  - [ ] `RUSTY_BOT_LLM_ENDPOINT`
-  - [ ] `RUSTY_BOT_LLM_MODEL`
-  - [ ] `RUSTY_BOT_DEMO_USE_VISION`
-  - [ ] `RUSTY_BOT_LLM_PROMPT`
-  - [ ] `RUSTY_BOT_DEMO_ECHO_TO_CLIENT`
-  - [ ] `RUSTY_BOT_DEMO_SUPPRESS_CLIENT_MOVEMENT`
+- [x] Create branch `local/agent-framework`.
+- [x] Run `cargo test` at workspace root and record current state (pass/fail) in this file under “Notes”.
+- [x] Add a single command to run the proxy demo in one line (document only; no code change needed yet):
+  - [x] `bash scripts/run_runner_with_mock.sh`
+- [x] Inventory runtime env vars currently used by the demo loop (documented from code):
+  - [x] `RUSTY_BOT_CONFIG_DIR`
+  - [x] `RUSTY_BOT_DEMO`
+  - [x] `RUSTY_BOT_REAL_CLIENT`
+  - [x] `RUSTY_BOT_LLM_ENDPOINT`
+  - [x] `RUSTY_BOT_LLM_MODEL`
+  - [x] `RUSTY_BOT_DEMO_USE_VISION`
+  - [x] `RUSTY_BOT_LLM_PROMPT`
+  - [x] `RUSTY_BOT_DEMO_ECHO_TO_CLIENT`
+  - [x] `RUSTY_BOT_DEMO_SUPPRESS_CLIENT_MOVEMENT`
 
 ### 1) Contracts (Schemas + Interfaces)
 - [ ] Decide where the agent runs:
-  - [ ] In-proxy process (default: simplest).
-  - [ ] Separate runner process (requires a JSON control protocol).
+  - [x] In-proxy process (decision for v1).
+  - [ ] Separate runner process (defer until after tool + observation schema stabilizes).
 - [ ] Define the LLM output contract:
-  - [ ] Must emit exactly one `<tool_call>...</tool_call>` block and nothing else.
-  - [ ] The JSON inside must be an object: `{"name":"...","arguments":{...}}`.
+  - [x] Must emit exactly one `<tool_call>...</tool_call>` block and nothing else.
+  - [x] The JSON inside must be an object: `{"name":"...","arguments":{...}}`.
   - [ ] Future: add `schema_version` once we move past the demo tool set.
 - [ ] Define tool-call schema (Rust structs + serde):
-  - [ ] `ToolCallWire { name, arguments }` (wire format inside `<tool_call>`).
-  - [ ] `name` is validated against a closed set.
-  - [ ] `arguments` is a per-tool typed struct (v1 can parse from JSON value).
+  - [x] `ToolCallWire { name, arguments }` (wire format inside `<tool_call>`).
+  - [x] `name` is validated against a closed set.
+  - [x] `arguments` is a per-tool typed struct (v1 parses/validates per tool).
 - [ ] Define tool-result schema:
-  - [ ] `ToolResult { request_id, status: ok|failed|retryable, reason, facts }`
-  - [ ] `facts` is a small JSON map for next-turn context.
+  - [x] `ToolResult { status: ok|failed|retryable, reason, facts }` (request ids deferred).
+  - [x] `facts` is a small JSON map for next-turn context.
 - [ ] Define `Observation` schema (stable JSON; capped lists):
-  - [ ] Self state summary
-  - [ ] Nearby entities summary (top N by distance)
-  - [ ] Last chat lines (cap)
-  - [ ] Last combat lines (cap)
-  - [ ] Derived flags: `moving`, `in_combat` (placeholder until supported), `stuck_suspected`
-- [ ] Define a `GameApi` trait boundary (agent calls this; proxy implements it):
-  - [ ] “Inject action” surface (prefer high-level, not opcodes)
-  - [ ] “Read observation inputs” surface (world snapshot)
+  - [x] Self state summary
+  - [x] Nearby entities summary (top N by distance)
+  - [x] Last chat lines (cap)
+  - [x] Last combat lines (cap)
+  - [x] Derived flags: `moving`, `stuck_suspected` (and deltas for completion checks)
+  - [ ] Derived flags: `in_combat` (placeholder until supported)
+- [x] Define a `GameApi` trait boundary (agent calls this; proxy implements it):
+  - [x] “Inject action” surface (prefer high-level, not opcodes)
+  - [x] “Read observation inputs” surface (world snapshot)
 
 ### 2) Implement `bot-core` Agent Module (Framework Code)
 Add a new module under:
 `crates/bot-core/src/agent/`
 
-- [ ] `mod.rs` exports:
-  - [ ] `AgentLoop`
-  - [ ] `Observation`
-  - [ ] `ToolCall`
-  - [ ] `ToolResult`
-  - [ ] `Executor`
-  - [ ] `GameApi` trait (if we decide it belongs in bot-core)
-- [ ] `observation.rs`:
-  - [ ] Build `Observation` from `WorldState` + injection-guard state inputs we already have.
-  - [ ] Derived facts (delta-based) needed for completion checks.
-- [ ] `tools.rs`:
+- [x] `mod.rs` exports:
+  - [x] `AgentLoop`
+  - [x] `Observation` (type exists; will expand as we add derived facts)
+  - [x] `ToolCall`
+  - [x] `ToolResult` (type exists; wire-up to execution is next)
+  - [x] `Executor` (scaffold exists)
+  - [x] `GameApi` trait (trait exists; proxy integration will implement it)
+- [x] `observation.rs`:
+  - [x] Build `Observation` from `WorldState` (v1).
+  - [x] Derived facts (delta-based) needed for completion checks (position + movement time deltas).
+- [x] `tools.rs`:
   - [ ] `Tool` trait + tool registry/dispatcher.
-  - [ ] Tool definitions for MVP movement set.
-- [ ] `executor.rs`:
-  - [ ] Action queue (1-step or N-step plan).
-  - [ ] Timeouts.
+  - [x] Tool definitions for MVP movement set (spec helpers: timeout + auto-stop).
+- [x] `executor.rs`:
+  - [x] Action queue (single-step from LLM + auto-stop follow-up).
+  - [x] Timeouts (scaffold).
   - [ ] Retry policy plumbing (max retries, backoff).
   - [ ] Mutual exclusion for continuous movement.
   - [ ] Enforce “stop-after-continuous” even if the LLM forgets.
-- [ ] `prompt.rs`:
-  - [ ] Prompt builder using `Observation`, current goal, and allowed tool list.
-  - [ ] Hard “JSON only” formatting rules.
-  - [ ] Include last tool result to help the LLM iterate.
-- [ ] `memory.rs`:
-  - [ ] Short-term memory: last N tool calls/results; last error string.
-  - [ ] Current goal text and a goal id.
-- [ ] Wire into `crates/bot-core/src/lib.rs`.
+- [x] `prompt.rs`:
+  - [x] Prompt builder using `Observation`, current goal, and allowed tool list (v1).
+  - [ ] Hard “JSON only” formatting rules (needs to reflect `<tool_call>` contract, plus stricter guardrails).
+  - [x] Include last tool error + history to help the LLM iterate.
+- [x] `memory.rs`:
+  - [x] Short-term memory: last N tool calls/results; last error string.
+  - [ ] Current goal text and a goal id (goal text exists; goal id later).
+- [x] Wire into `crates/bot-core/src/lib.rs`.
 
 Acceptance checks
-- [ ] `cargo test -p rusty-bot-core` passes.
+- [x] `cargo test -p rusty-bot-core` passes.
 - [ ] Agent module does not depend on gateway-proxy crate types.
 
 ### 3) Tooling MVP (Start Small, Make It Reliable)
@@ -152,20 +153,23 @@ Acceptance checks
 - [ ] Continuous tools never leave the character “stuck turning/running” if the LLM hangs (executor must auto-stop).
 
 ### 4) Proxy Integration (Implement `GameApi`)
-- [ ] Introduce a proxy-side `GameApi` implementation that wraps existing injection channels + world state.
-- [ ] Extract the movement-template injection logic from the demo into reusable methods:
-  - [ ] “get template”
-  - [ ] “build movement packet for command”
-  - [ ] “apply injection guard”
-  - [ ] “send packet” (upstream/both routing)
-- [ ] Replace (or gate behind a new flag) `run_demo_llm_injector` with an agent loop tick:
-  - [ ] Periodic tick reads observation
-  - [ ] If executor idle, call LLM for next tool
-  - [ ] Execute tool and wait for completion
+- [x] Introduce a proxy-side `GameApi` implementation that wraps existing injection channels + world state.
+- [x] Extract the movement-template injection logic from the demo into reusable methods:
+  - [x] “get template”
+  - [x] “build movement packet for command”
+  - [x] “apply injection guard”
+  - [x] “send packet” (upstream/both routing)
+- [x] Replace (or gate behind a new flag) `run_demo_llm_injector` with an agent loop tick:
+  - [x] Periodic tick reads observation
+  - [x] If executor idle, call LLM for next tool
+  - [x] Execute tool and wait for completion (v1: observation + duration-based completion)
 
 Acceptance checks
-- [ ] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_DEMO_USE_VISION=1`.
-- [ ] LLM down/unreachable triggers emergency stop behavior and keeps loop alive.
+- [x] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_DEMO_USE_VISION=1`.
+- [x] LLM down/unreachable triggers emergency stop behavior and keeps loop alive.
+
+### Release Hygiene (Later)
+- [ ] Major release: default verbose proxy/agent debug logging OFF (make it opt-in via env/config); keep current defaults during active development.
 
 ### 5) LLM Adapter Hardening (Parsing + Guardrails)
 - [ ] Strict JSON parse of LLM output into `ToolCall`.
@@ -242,3 +246,4 @@ These depend on new packet support + state tracking; keep them blocked until fra
 ## Notes (Keep Short, Update As We Go)
 - Date: 2026-02-13
 - Workspace: `<repo-root>`
+- Baseline: `cargo test` (workspace) PASS (0 tests) on 2026-02-13
