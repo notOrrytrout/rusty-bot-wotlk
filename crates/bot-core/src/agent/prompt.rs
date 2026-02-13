@@ -147,10 +147,7 @@ mod tests {
         assert!(v.get("derived").is_some());
         assert_eq!(v.get("goal").and_then(|v| v.as_str()), Some("do a thing"));
         assert_eq!(v.get("goal_id").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(
-            v.get("goal_state").and_then(|v| v.as_str()),
-            Some("active")
-        );
+        assert_eq!(v.get("goal_state").and_then(|v| v.as_str()), Some("active"));
         assert_eq!(
             v.get("last_error").and_then(|v| v.as_str()),
             Some("bad output")

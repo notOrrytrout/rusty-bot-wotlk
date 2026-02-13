@@ -51,7 +51,9 @@ impl Tool for ToolId {
             ToolId::RequestMove => {
                 "request_move {\"direction\":\"forward|backward|left|right\",\"duration_ms\":150..5000}"
             }
-            ToolId::RequestTurn => "request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}",
+            ToolId::RequestTurn => {
+                "request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}"
+            }
             ToolId::RequestStop => "request_stop {\"kind\":\"move|turn|strafe|all\"}",
             ToolId::RequestJump => "request_jump {}",
             ToolId::RequestEmote => {
@@ -203,16 +205,36 @@ mod tests {
 
     fn sample_call_for(tool: ToolId) -> &'static str {
         match tool {
-            ToolId::RequestMove => "<tool_call>{\"name\":\"request_move\",\"arguments\":{\"direction\":\"forward\",\"duration_ms\":200}}</tool_call>",
-            ToolId::RequestTurn => "<tool_call>{\"name\":\"request_turn\",\"arguments\":{\"direction\":\"left\",\"duration_ms\":200}}</tool_call>",
-            ToolId::RequestStop => "<tool_call>{\"name\":\"request_stop\",\"arguments\":{\"kind\":\"all\"}}</tool_call>",
-            ToolId::RequestJump => "<tool_call>{\"name\":\"request_jump\",\"arguments\":{}}</tool_call>",
-            ToolId::RequestEmote => "<tool_call>{\"name\":\"request_emote\",\"arguments\":{\"key\":\"wave\"}}</tool_call>",
-            ToolId::RequestIdle => "<tool_call>{\"name\":\"request_idle\",\"arguments\":{}}</tool_call>",
-            ToolId::TargetGuid => "<tool_call>{\"name\":\"target_guid\",\"arguments\":{\"guid\":42}}</tool_call>",
-            ToolId::TargetNearestNpc => "<tool_call>{\"name\":\"target_nearest_npc\",\"arguments\":{}}</tool_call>",
-            ToolId::Interact => "<tool_call>{\"name\":\"interact\",\"arguments\":{\"guid\":42}}</tool_call>",
-            ToolId::Cast => "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1,\"guid\":42}}</tool_call>",
+            ToolId::RequestMove => {
+                "<tool_call>{\"name\":\"request_move\",\"arguments\":{\"direction\":\"forward\",\"duration_ms\":200}}</tool_call>"
+            }
+            ToolId::RequestTurn => {
+                "<tool_call>{\"name\":\"request_turn\",\"arguments\":{\"direction\":\"left\",\"duration_ms\":200}}</tool_call>"
+            }
+            ToolId::RequestStop => {
+                "<tool_call>{\"name\":\"request_stop\",\"arguments\":{\"kind\":\"all\"}}</tool_call>"
+            }
+            ToolId::RequestJump => {
+                "<tool_call>{\"name\":\"request_jump\",\"arguments\":{}}</tool_call>"
+            }
+            ToolId::RequestEmote => {
+                "<tool_call>{\"name\":\"request_emote\",\"arguments\":{\"key\":\"wave\"}}</tool_call>"
+            }
+            ToolId::RequestIdle => {
+                "<tool_call>{\"name\":\"request_idle\",\"arguments\":{}}</tool_call>"
+            }
+            ToolId::TargetGuid => {
+                "<tool_call>{\"name\":\"target_guid\",\"arguments\":{\"guid\":42}}</tool_call>"
+            }
+            ToolId::TargetNearestNpc => {
+                "<tool_call>{\"name\":\"target_nearest_npc\",\"arguments\":{}}</tool_call>"
+            }
+            ToolId::Interact => {
+                "<tool_call>{\"name\":\"interact\",\"arguments\":{\"guid\":42}}</tool_call>"
+            }
+            ToolId::Cast => {
+                "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1,\"guid\":42}}</tool_call>"
+            }
         }
     }
 
@@ -220,9 +242,8 @@ mod tests {
     fn registry_tool_signatures_parse_via_wire_contract() {
         for tool in registry() {
             let raw = sample_call_for(*tool);
-            let inv = parse_tool_call(raw).unwrap_or_else(|e| {
-                panic!("tool {} should parse, got {e:#}", tool.name())
-            });
+            let inv = parse_tool_call(raw)
+                .unwrap_or_else(|e| panic!("tool {} should parse, got {e:#}", tool.name()));
             assert_eq!(tool_id_for_call(&inv.call), *tool);
         }
     }

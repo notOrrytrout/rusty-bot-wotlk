@@ -1833,11 +1833,7 @@ struct ProxyAgentApi {
 }
 
 impl ProxyAgentApi {
-    fn pick_nearest_npc_guid(
-        ws: &WorldState,
-        self_guid: u64,
-        entry: Option<u32>,
-    ) -> Option<u64> {
+    fn pick_nearest_npc_guid(ws: &WorldState, self_guid: u64, entry: Option<u32>) -> Option<u64> {
         let self_pos = ws.players.get(&self_guid).map(|p| p.position.clone())?;
         let mut best: Option<(u64, f32)> = None;
         for npc in ws.npcs.values() {
@@ -1977,7 +1973,9 @@ impl AgentGameApi for ProxyAgentApi {
 
             match &tool.call {
                 AgentToolCall::TargetGuid(args) => {
-                    let status = self.send_packet(build_cmsg_set_selection(args.guid)).await?;
+                    let status = self
+                        .send_packet(build_cmsg_set_selection(args.guid))
+                        .await?;
                     let reason = if status == AgentToolStatus::Ok {
                         "set_selection".to_string()
                     } else {
@@ -1990,11 +1988,14 @@ impl AgentGameApi for ProxyAgentApi {
                     });
                 }
                 AgentToolCall::TargetNearestNpc(args) => {
-                    let self_guid = self.injection_guard.lock().await.last_self_guid.unwrap_or(0);
+                    let self_guid = self
+                        .injection_guard
+                        .lock()
+                        .await
+                        .last_self_guid
+                        .unwrap_or(0);
                     let ws = self.world_state.lock().await;
-                    let Some(guid) =
-                        Self::pick_nearest_npc_guid(&ws, self_guid, args.entry)
-                    else {
+                    let Some(guid) = Self::pick_nearest_npc_guid(&ws, self_guid, args.entry) else {
                         return Ok(AgentToolResult {
                             status: AgentToolStatus::Failed,
                             reason: "no_npc_found".to_string(),

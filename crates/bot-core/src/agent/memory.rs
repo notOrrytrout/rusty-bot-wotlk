@@ -196,7 +196,11 @@ mod tests {
             self_guid: 1,
             self_state: Some(SelfSummary {
                 guid: 1,
-                pos: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+                pos: Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
                 orient: 0.0,
                 movement_flags: 0,
                 movement_time: 1,

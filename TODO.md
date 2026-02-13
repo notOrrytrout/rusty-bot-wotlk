@@ -17,7 +17,7 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 
 ### Observation / World State
 - [x] Server packet observation updates a shared `WorldState` on some opcodes:
-  - `SMSG_UPDATE_OBJECT` -> updates `WorldState` objects (partial implementation). (`crates/gateway-proxy/src/proxy.rs`, `crates/bot-core/src/world/world_state.rs`)
+  - `SMSG_UPDATE_OBJECT` -> updates `WorldState` objects (block count, packed GUIDs, create/values/movement, out-of-range removals; still partial field coverage). (`crates/gateway-proxy/src/proxy.rs`, `crates/bot-core/src/world/world_state.rs`)
   - `SMSG_MESSAGECHAT` -> chat log (basic parsing). (`crates/gateway-proxy/src/proxy.rs`)
   - `SMSG_ATTACKERSTATEUPDATE` -> combat log placeholder message. (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Client movement observation updates the local player position/orientation/timestamp in `WorldState` when movement packets can be parsed. (`crates/gateway-proxy/src/proxy.rs`)
@@ -26,6 +26,7 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 - [x] `rusty-bot-core` crate exists with world model + vision prompt + minimal LLM client. (`crates/bot-core/src/lib.rs`)
 - [x] `WorldState` holds players/NPCs/other players, chat/combat logs, and a tick counter. (`crates/bot-core/src/world/world_state.rs`)
 - [x] `WorldState.apply_update_object()` populates partial fields for:
+  - entity position/orientation/timestamp for create + movement update types (subset of movement formats)
   - player health/max health/level/power type/power/flags
   - visible equipment entries (via visible-item fields)
   - backpack slots (partial)
