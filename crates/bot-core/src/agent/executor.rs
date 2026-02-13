@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::memory::{ToolResult, ToolStatus};
-use super::tools::{auto_stop_after, default_timeout, is_continuous};
-use super::observation::Observation;
 use super::ToolCall;
+use super::memory::{ToolResult, ToolStatus};
+use super::observation::Observation;
+use super::tools::{auto_stop_after, default_timeout, is_continuous};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutorState {
@@ -93,7 +93,11 @@ impl Executor {
         Some((
             tool,
             ToolResult {
-                status: if cont { ToolStatus::Ok } else { ToolStatus::Retryable },
+                status: if cont {
+                    ToolStatus::Ok
+                } else {
+                    ToolStatus::Retryable
+                },
                 reason: if cont {
                     "duration_elapsed".to_string()
                 } else {
@@ -104,11 +108,11 @@ impl Executor {
         ))
     }
 
-    pub fn tick_observation(
-        &mut self,
-        obs: &Observation,
-    ) -> Option<(ToolCall, ToolResult)> {
-        let ExecutorState::Waiting { tool, stop_after, .. } = &self.state else {
+    pub fn tick_observation(&mut self, obs: &Observation) -> Option<(ToolCall, ToolResult)> {
+        let ExecutorState::Waiting {
+            tool, stop_after, ..
+        } = &self.state
+        else {
             return None;
         };
 
@@ -164,7 +168,10 @@ impl Executor {
     }
 
     pub fn complete(&mut self, result: ToolResult) -> Option<(ToolCall, ToolResult)> {
-        let ExecutorState::Waiting { tool, stop_after, .. } = &self.state else {
+        let ExecutorState::Waiting {
+            tool, stop_after, ..
+        } = &self.state
+        else {
             return None;
         };
         let tool = tool.clone();

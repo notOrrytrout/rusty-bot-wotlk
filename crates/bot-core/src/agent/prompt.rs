@@ -43,4 +43,3 @@ pub fn build_control_prompt(
         cfg.tool_list, cfg.tool_call_contract
     )
 }
-

@@ -101,9 +101,8 @@ fn parse_args<T: for<'de> Deserialize<'de>>(
     val: serde_json::Value,
     tool_name: &'static str,
 ) -> Result<T, ToolParseError> {
-    serde_json::from_value::<T>(val).map_err(|e| {
-        ToolParseError::InvalidArguments(format!("{tool_name}: {e}"))
-    })
+    serde_json::from_value::<T>(val)
+        .map_err(|e| ToolParseError::InvalidArguments(format!("{tool_name}: {e}")))
 }
 
 fn validate_emote_key(key: &str) -> bool {

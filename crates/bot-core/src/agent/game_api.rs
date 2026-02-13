@@ -1,9 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use super::ToolCall;
 use super::memory::ToolResult;
 use super::observation::Observation;
-use super::ToolCall;
 
 /// Boundary the agent uses to read game state and execute tools.
 ///

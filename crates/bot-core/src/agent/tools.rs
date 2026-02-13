@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use super::ToolCall;
 use super::memory::ToolResult;
 use super::wire::{RequestMoveArgs, RequestStopArgs, RequestTurnArgs, StopKind};
-use super::ToolCall;
 
 pub trait ToolMeta {
     fn is_continuous(&self) -> bool;

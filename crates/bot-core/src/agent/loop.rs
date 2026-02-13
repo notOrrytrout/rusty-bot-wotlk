@@ -1,8 +1,8 @@
 use super::executor::Executor;
 use super::memory::AgentMemory;
 use super::observation::{Observation, ObservationBuilder};
-use super::prompt::{build_control_prompt, PromptConfig};
-use super::{parse_tool_call, ToolCall};
+use super::prompt::{PromptConfig, build_control_prompt};
+use super::{ToolCall, parse_tool_call};
 
 #[derive(Debug)]
 pub struct AgentLoop {

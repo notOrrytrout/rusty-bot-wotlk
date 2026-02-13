@@ -14,13 +14,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use rusty_bot_core::player::player_state::PlayerCurrentState;
+use rusty_bot_core::agent::ToolCall as AgentToolCall;
 use rusty_bot_core::agent::game_api::GameApi as AgentGameApi;
+use rusty_bot_core::agent::r#loop::AgentLoop;
 use rusty_bot_core::agent::memory::{ToolResult as AgentToolResult, ToolStatus as AgentToolStatus};
 use rusty_bot_core::agent::observation::ObservationBuilder as AgentObservationBuilder;
-use rusty_bot_core::agent::r#loop::AgentLoop;
 use rusty_bot_core::agent::tools::ToolMeta;
-use rusty_bot_core::agent::ToolCall as AgentToolCall;
+use rusty_bot_core::player::player_state::PlayerCurrentState;
 use rusty_bot_core::vision::generate_prompt as generate_vision_prompt;
 use rusty_bot_core::world::world_state::WorldState;
 
@@ -193,10 +193,7 @@ fn tool_call_to_demo_intent(call: &ToolCallWire) -> Option<DemoIntent> {
     let name = call.name.trim().to_ascii_lowercase();
 
     let duration_from_args = || -> Option<Duration> {
-        let ms = call
-            .arguments
-            .get("duration_ms")
-            .and_then(|v| v.as_u64())?;
+        let ms = call.arguments.get("duration_ms").and_then(|v| v.as_u64())?;
         let clamped = ms.clamp(150, 5_000) as u64;
         Some(Duration::from_millis(clamped))
     };
@@ -296,8 +293,7 @@ fn parse_demo_intent(script: &str) -> Option<DemoIntent> {
         }
         println!(
             "proxy.bot.demo tool_call_unsupported name=\"{}\" args={}",
-            call.name,
-            call.arguments
+            call.name, call.arguments
         );
         return None;
     }
@@ -1323,7 +1319,10 @@ async fn record_client_movement_observation(
     }
 }
 
-async fn record_server_world_observation(packet: &WorldPacket, world_state: &Arc<Mutex<WorldState>>) {
+async fn record_server_world_observation(
+    packet: &WorldPacket,
+    world_state: &Arc<Mutex<WorldState>>,
+) {
     const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
     const SMSG_MESSAGECHAT: u16 = 0x0096;
     const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A;
@@ -1336,7 +1335,10 @@ async fn record_server_world_observation(packet: &WorldPacket, world_state: &Arc
     match opcode {
         SMSG_UPDATE_OBJECT => {
             if let Err(err) = ws.apply_update_object(&packet.body) {
-                eprintln!("proxy.world.state.update_object_failed error={err:#} body_len={}", packet.body.len());
+                eprintln!(
+                    "proxy.world.state.update_object_failed error={err:#} body_len={}",
+                    packet.body.len()
+                );
             }
         }
         SMSG_MESSAGECHAT => {
@@ -1346,7 +1348,10 @@ async fn record_server_world_observation(packet: &WorldPacket, world_state: &Arc
         }
         SMSG_ATTACKERSTATEUPDATE => {
             // Keep this crude for now; better parsing can be added when needed.
-            ws.add_combat_message(format!("SMSG_ATTACKERSTATEUPDATE len={}", packet.body.len()));
+            ws.add_combat_message(format!(
+                "SMSG_ATTACKERSTATEUPDATE len={}",
+                packet.body.len()
+            ));
         }
         _ => {}
     }
@@ -1472,8 +1477,7 @@ async fn run_demo_llm_injector(
                     completed_reason = Some("client-correction");
                 }
                 if completed_reason.is_none()
-                    && now.saturating_duration_since(pending.issued_at)
-                        >= pending.timeout
+                    && now.saturating_duration_since(pending.issued_at) >= pending.timeout
                 {
                     completed_reason = Some("timeout");
                 }
@@ -1520,13 +1524,9 @@ async fn run_demo_llm_injector(
                         packet.opcode,
                         packet.body.len()
                     );
-                    if let Err(err) = send_injected_packet(
-                        packet,
-                        &upstream_tx,
-                        &downstream_tx,
-                        echo_to_client,
-                    )
-                    .await
+                    if let Err(err) =
+                        send_injected_packet(packet, &upstream_tx, &downstream_tx, echo_to_client)
+                            .await
                     {
                         eprintln!("proxy.bot.demo stop_send_failed error={err:#}");
                         return Ok(());
@@ -1588,7 +1588,9 @@ async fn run_demo_llm_injector(
                             if let Some(pkt) = apply_injection_guard(pkt, &injection_guard).await {
                                 println!(
                                     "proxy.bot.demo emergency_stop cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                                    cmd, pkt.opcode, pkt.body.len()
+                                    cmd,
+                                    pkt.opcode,
+                                    pkt.body.len()
                                 );
                                 let _ = send_injected_packet(
                                     pkt,
@@ -1625,10 +1627,14 @@ async fn run_demo_llm_injector(
                         }
                         for cmd in ["turn stop", "strafe stop", "move stop"] {
                             if let Some(pkt) = prepare_demo_packet(cmd, &injection_guard).await {
-                                if let Some(pkt) = apply_injection_guard(pkt, &injection_guard).await {
+                                if let Some(pkt) =
+                                    apply_injection_guard(pkt, &injection_guard).await
+                                {
                                     println!(
                                         "proxy.bot.demo emergency_stop cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                                        cmd, pkt.opcode, pkt.body.len()
+                                        cmd,
+                                        pkt.opcode,
+                                        pkt.body.len()
                                     );
                                     let _ = send_injected_packet(
                                         pkt,
@@ -1664,7 +1670,9 @@ async fn run_demo_llm_injector(
                             if let Some(pkt) = apply_injection_guard(pkt, &injection_guard).await {
                                 println!(
                                     "proxy.bot.demo emergency_stop cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                                    cmd, pkt.opcode, pkt.body.len()
+                                    cmd,
+                                    pkt.opcode,
+                                    pkt.body.len()
                                 );
                                 let _ = send_injected_packet(
                                     pkt,
@@ -1744,9 +1752,9 @@ async fn run_demo_llm_injector(
         last_emitted_at = Some(now);
         {
             let mut state = injection_guard.lock().await;
-            let timeout = intent
-                .timeout
-                .unwrap_or_else(|| default_action_timeout_for(&last_emitted_cmd.clone().unwrap_or_default()));
+            let timeout = intent.timeout.unwrap_or_else(|| {
+                default_action_timeout_for(&last_emitted_cmd.clone().unwrap_or_default())
+            });
             state.pending_action = Some(PendingAction {
                 cmd: last_emitted_cmd
                     .clone()
@@ -1809,10 +1817,20 @@ impl AgentGameApi for ProxyAgentApi {
     fn observe<'a>(
         &'a self,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<rusty_bot_core::agent::observation::Observation>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<
+                    Output = anyhow::Result<rusty_bot_core::agent::observation::Observation>,
+                > + Send
+                + 'a,
+        >,
     > {
         Box::pin(async move {
-            let self_guid = self.injection_guard.lock().await.last_self_guid.unwrap_or(0);
+            let self_guid = self
+                .injection_guard
+                .lock()
+                .await
+                .last_self_guid
+                .unwrap_or(0);
             let ws = self.world_state.lock().await;
             let mut b = self.observation_builder.lock().await;
             Ok(b.build(&ws, self_guid))
@@ -1822,7 +1840,9 @@ impl AgentGameApi for ProxyAgentApi {
     fn execute_tool<'a>(
         &'a self,
         tool: AgentToolCall,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<AgentToolResult>> + Send + 'a>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<AgentToolResult>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let cmds = Self::tool_to_demo_command(&tool);
             if cmds.is_empty() {
@@ -1841,16 +1861,22 @@ impl AgentGameApi for ProxyAgentApi {
                         facts: serde_json::json!({ "cmd": cmd }),
                     });
                 };
-                let Some(packet) = apply_injection_guard(packet, &self.injection_guard).await else {
+                let Some(packet) = apply_injection_guard(packet, &self.injection_guard).await
+                else {
                     return Ok(AgentToolResult {
                         status: AgentToolStatus::Retryable,
                         reason: "injection_suppressed".to_string(),
                         facts: serde_json::json!({ "cmd": cmd }),
                     });
                 };
-                send_injected_packet(packet, &self.upstream_tx, &self.downstream_tx, self.echo_to_client)
-                    .await
-                    .with_context(|| format!("inject cmd={cmd}"))?;
+                send_injected_packet(
+                    packet,
+                    &self.upstream_tx,
+                    &self.downstream_tx,
+                    self.echo_to_client,
+                )
+                .await
+                .with_context(|| format!("inject cmd={cmd}"))?;
             }
 
             Ok(AgentToolResult {
@@ -1927,12 +1953,18 @@ async fn run_agent_llm_injector(
 
         // Completion checks.
         if let Some((tool, result)) = agent.executor.tick_observation(&obs) {
-            println!("proxy.bot.agent complete tool={tool:?} status={:?} reason={}", result.status, result.reason);
+            println!(
+                "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
+                result.status, result.reason
+            );
             agent.memory.record(tool, result);
             continue;
         }
         if let Some((tool, result)) = agent.executor.tick_timeout(std::time::Instant::now()) {
-            println!("proxy.bot.agent timeout tool={tool:?} status={:?} reason={}", result.status, result.reason);
+            println!(
+                "proxy.bot.agent timeout tool={tool:?} status={:?} reason={}",
+                result.status, result.reason
+            );
             agent.memory.record(tool, result);
             continue;
         }
@@ -1979,9 +2011,15 @@ async fn run_agent_llm_injector(
                     eprintln!("proxy.bot.agent poll_failed error={err:#}");
                     // When the LLM is down, do not keep issuing movement. Prefer hard stops.
                     for stop in [
-                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs { kind: rusty_bot_core::agent::wire::StopKind::Turn }),
-                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs { kind: rusty_bot_core::agent::wire::StopKind::Strafe }),
-                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs { kind: rusty_bot_core::agent::wire::StopKind::Move }),
+                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs {
+                            kind: rusty_bot_core::agent::wire::StopKind::Turn,
+                        }),
+                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs {
+                            kind: rusty_bot_core::agent::wire::StopKind::Strafe,
+                        }),
+                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs {
+                            kind: rusty_bot_core::agent::wire::StopKind::Move,
+                        }),
                     ] {
                         let _ = api.execute_tool(stop).await;
                     }
@@ -2053,9 +2091,7 @@ fn sanitize_demo_command(script: &str) -> Option<String> {
             Some("move backward".to_string())
         }
         "move left" | "left" | "strafe left" | "q" => Some("move left".to_string()),
-        "move right" | "right" | "strafe right" | "e" => {
-            Some("move right".to_string())
-        }
+        "move right" | "right" | "strafe right" | "e" => Some("move right".to_string()),
         "move stop" | "stop" | "idle" | "wait" | "hold" | "halt" | "x" => {
             Some("move stop".to_string())
         }
@@ -2241,7 +2277,13 @@ fn demo_advance_kinematics(movement_info: &mut MovementInfo, command: &str, delt
         }
         "turn stop" => {}
         "move forward" | "move backward" | "move left" | "move right" => {
-            let dist = move_speed * secs * if command == "move backward" { -1.0 } else { 1.0 };
+            let dist = move_speed
+                * secs
+                * if command == "move backward" {
+                    -1.0
+                } else {
+                    1.0
+                };
             let (dx, dy) = match command {
                 "move forward" | "move backward" => (yaw.cos(), yaw.sin()),
                 "move left" => (
@@ -2399,7 +2441,9 @@ fn apply_demo_command_to_movement(movement_info: &mut MovementInfo, command: &st
             movement_info.movement_flags.insert(MovementFlags::RIGHT);
         }
         "turn stop" => {
-            movement_info.movement_flags.remove(MovementFlags::LEFT | MovementFlags::RIGHT);
+            movement_info
+                .movement_flags
+                .remove(MovementFlags::LEFT | MovementFlags::RIGHT);
         }
         "jump" => {
             movement_info.movement_flags.insert(MovementFlags::JUMPING);

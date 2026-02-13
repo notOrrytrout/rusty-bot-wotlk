@@ -15,8 +15,6 @@ pub mod prompt;
 pub mod tools;
 pub mod wire;
 
-pub use wire::{
-    extract_tool_call_json, parse_tool_call, ToolCall, ToolCallWire, ToolParseError,
-};
+pub use wire::{ToolCall, ToolCallWire, ToolParseError, extract_tool_call_json, parse_tool_call};
 
 pub use r#loop::AgentLoop;
