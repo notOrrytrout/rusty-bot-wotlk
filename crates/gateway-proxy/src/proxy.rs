@@ -1542,6 +1542,33 @@ mod tool_packet_tests {
     }
 }
 
+#[cfg(test)]
+mod llm_payload_tests {
+    use super::build_ollama_generate_payload;
+
+    #[test]
+    fn ollama_payload_includes_keep_alive_and_num_ctx_when_set() {
+        let v = build_ollama_generate_payload("m", "p", Some("10m"), Some(2048));
+        assert_eq!(v.get("model").and_then(|v| v.as_str()), Some("m"));
+        assert_eq!(v.get("prompt").and_then(|v| v.as_str()), Some("p"));
+        assert_eq!(v.get("stream").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(v.get("keep_alive").and_then(|v| v.as_str()), Some("10m"));
+        assert_eq!(
+            v.get("options")
+                .and_then(|o| o.get("num_ctx"))
+                .and_then(|v| v.as_u64()),
+            Some(2048)
+        );
+    }
+
+    #[test]
+    fn ollama_payload_omits_optional_fields_when_unset() {
+        let v = build_ollama_generate_payload("m", "p", None, None);
+        assert!(v.get("keep_alive").is_none());
+        assert!(v.get("options").is_none());
+    }
+}
+
 async fn record_client_movement_observation(
     packet: &WorldPacket,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
@@ -2179,6 +2206,8 @@ struct ProxyLlmClient {
     client: reqwest::Client,
     endpoint: String,
     model: String,
+    keep_alive: Option<String>,
+    num_ctx: Option<u32>,
     limiter: Arc<Mutex<RateLimiter>>,
 }
 
@@ -2218,11 +2247,12 @@ impl AgentLlmClient for ProxyLlmClient {
             let resp = self
                 .client
                 .post(&self.endpoint)
-                .json(&serde_json::json!({
-                    "model": self.model,
-                    "prompt": prompt,
-                    "stream": false
-                }))
+                .json(&build_ollama_generate_payload(
+                    &self.model,
+                    &prompt,
+                    self.keep_alive.as_deref(),
+                    self.num_ctx,
+                ))
                 .send()
                 .await
                 .map_err(|e| anyhow::Error::new(LlmPollFailed(e)))?;
@@ -2251,6 +2281,41 @@ impl AgentLlmClient for ProxyLlmClient {
             Ok(script)
         })
     }
+}
+
+fn build_ollama_generate_payload(
+    model: &str,
+    prompt: &str,
+    keep_alive: Option<&str>,
+    num_ctx: Option<u32>,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "model": model,
+        "prompt": prompt,
+        "stream": false,
+    });
+
+    if let Some(keep_alive) = keep_alive {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "keep_alive".to_string(),
+                serde_json::Value::String(keep_alive.to_string()),
+            );
+        }
+    }
+
+    if let Some(num_ctx) = num_ctx {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "options".to_string(),
+                serde_json::json!({
+                    "num_ctx": num_ctx,
+                }),
+            );
+        }
+    }
+
+    v
 }
 
 async fn run_agent_llm_injector(
@@ -2310,13 +2375,30 @@ async fn run_agent_llm_injector(
         limiter: limiter.clone(),
     };
 
+    // Ollama can take a few seconds to load a model the first time. If we set a tiny timeout,
+    // the request gets canceled and Ollama may repeatedly restart the runner, appearing as if
+    // the model "reloads on every call".
+    let llm_timeout_ms: u64 = std::env::var("RUSTY_BOT_LLM_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30_000);
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(1200))
+        .timeout(Duration::from_millis(llm_timeout_ms))
         .build()?;
+    let keep_alive = std::env::var("RUSTY_BOT_OLLAMA_KEEP_ALIVE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| Some("10m".to_string()));
+    // Optional per-request context limit for Ollama. If unset, Ollama uses its model default.
+    let num_ctx: Option<u32> = std::env::var("RUSTY_BOT_LLM_NUM_CTX")
+        .ok()
+        .and_then(|v| v.parse().ok());
     let llm = ProxyLlmClient {
         client,
         endpoint: endpoint.clone(),
         model: model.clone(),
+        keep_alive,
+        num_ctx,
         limiter: limiter.clone(),
     };
     let mut tick = tokio::time::interval(Duration::from_millis(350));
@@ -2329,6 +2411,8 @@ async fn run_agent_llm_injector(
     let mut enabled = start_enabled;
     let mut human_override_until: Option<Instant> = None;
     let mut human_override_active_prev = false;
+    let mut llm_backoff_until: Option<Instant> = None;
+    let mut llm_failures: u32 = 0;
 
     loop {
         tokio::select! {
@@ -2389,6 +2473,12 @@ async fn run_agent_llm_injector(
                     continue;
                 }
 
+                if let Some(until) = llm_backoff_until {
+                    if Instant::now() < until {
+                        continue;
+                    }
+                }
+
                 let prompt_suffix = if use_vision {
                     let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
                     let ws = world_state.lock().await;
@@ -2407,6 +2497,9 @@ async fn run_agent_llm_injector(
                 let out = agent_tick(&mut agent, &api, &llm, cfg, now).await;
                 match out {
                     Ok(AgentHarnessOutcome::Completed { tool, result }) => {
+                        // Successful model interaction or deterministic stepping; clear any prior backoff.
+                        llm_failures = 0;
+                        llm_backoff_until = None;
                         println!(
                             "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
                             result.status, result.reason
@@ -2414,10 +2507,19 @@ async fn run_agent_llm_injector(
                     }
                     Ok(AgentHarnessOutcome::Executed { .. })
                     | Ok(AgentHarnessOutcome::Offered { .. })
-                    | Ok(AgentHarnessOutcome::Observed) => {}
+                    | Ok(AgentHarnessOutcome::Observed) => {
+                        // Non-error; clear backoff.
+                        llm_failures = 0;
+                        llm_backoff_until = None;
+                    }
                     Err(err) => {
                         if err.is::<LlmPollFailed>() {
                             eprintln!("proxy.bot.agent poll_failed error={err:#}");
+                            llm_failures = llm_failures.saturating_add(1);
+                            let delay_ms = (500u64)
+                                .saturating_mul(2u64.saturating_pow(llm_failures.saturating_sub(1).min(5)));
+                            let delay_ms = delay_ms.min(10_000);
+                            llm_backoff_until = Some(Instant::now() + Duration::from_millis(delay_ms));
                             // When the LLM is down, do not keep issuing movement. Prefer hard stops.
                             for stop in [
                                 AgentToolInvocation {
