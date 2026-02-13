@@ -149,3 +149,9 @@ This repo contains code that was copied/ported from the repo `https://github.com
 - `crates/gateway-proxy/src/wotlk.rs` SRP implementation was ported from `tentacli` WotLK login SRP (`src/plugins/wow/wotlk/login/srp.rs`).
 - `crates/gateway-proxy/src/wotlk.rs` RC4 implementation/keys were ported from `tentacli` WotLK realm RC4 (`src/plugins/wow/wotlk/realm/rc4.rs`).
 - `crates/gateway-proxy/src/wotlk.rs` movement structs/flags were ported from `tentacli` WotLK movement types (`src/plugins/wow/wotlk/realm/object/types/movement.rs`).
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0-only). See `LICENSE`.
+
+This repository also includes code derived from `tentacli` (Apache License 2.0). See `THIRD_PARTY_NOTICES.md` and `LICENSES/Apache-2.0.txt`.
