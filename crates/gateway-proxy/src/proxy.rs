@@ -2523,9 +2523,22 @@ async fn run_agent_llm_injector(
                         let _ = reply.send(res);
                     }
                     AgentControlCommand::Status { reply } => {
+                        let (self_guid, move_mask, has_move_template, last_move_time) = {
+                            let g = injection_guard.lock().await;
+                            (
+                                g.last_self_guid.unwrap_or(0),
+                                g.client_move_mask,
+                                g.last_client_move_packet.is_some(),
+                                g.last_client_move_time,
+                            )
+                        };
                         let _ = reply.send(serde_json::json!({
                             "ok": true,
                             "enabled": enabled,
+                            "self_guid": self_guid,
+                            "movement_template_present": has_move_template,
+                            "movement_template_mask": move_mask,
+                            "last_client_move_time": last_move_time,
                             "goal": agent.memory.goal.clone(),
                             "goal_id": agent.memory.goal_id,
                             "goal_state": agent.memory.goal_state,

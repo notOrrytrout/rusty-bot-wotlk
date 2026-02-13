@@ -89,6 +89,17 @@ def _fmt_pos(pos: Dict[str, Any]) -> str:
 
 
 def _print_entities(obs: Dict[str, Any]) -> None:
+    self_guid = obs.get("self_guid")
+    self_state = obs.get("self_state") or {}
+    if self_state:
+        pos = self_state.get("pos") or {}
+        print(
+            f"\nSelf: guid={self_guid} pos={_fmt_pos(pos)} orient={self_state.get('orient')} "
+            f"move_flags={self_state.get('movement_flags')} time={self_state.get('movement_time')}"
+        )
+    else:
+        print(f"\nSelf: guid={self_guid} (no self_state yet; move your character to seed it)")
+
     npcs = obs.get("npcs_nearby") or []
     players = obs.get("players_nearby") or []
 
@@ -119,7 +130,14 @@ def _pick_entity(obs: Dict[str, Any]) -> Optional[SelectedEntity]:
     t = _prompt_int("choice [1/2]: ")
     if t == 1:
         npcs = obs.get("npcs_nearby") or []
-        idx = _prompt_int(f"npc index [0..{max(len(npcs)-1,0)}]: ")
+        if not npcs:
+            print("no NPCs in last observation; choose (2) to refresh, or pick Player")
+            return None
+        print("indices are 0-based (first item is 0)")
+        idx = _prompt_int(f"npc index [0..{len(npcs)-1}]: ")
+        # Common UX: users type 1 when there's only one item (index 0).
+        if idx is not None and idx == len(npcs):
+            idx -= 1
         if idx is None or idx < 0 or idx >= len(npcs):
             print("invalid npc index")
             return None
@@ -127,7 +145,13 @@ def _pick_entity(obs: Dict[str, Any]) -> Optional[SelectedEntity]:
         return SelectedEntity(kind="npc", guid=int(n["guid"]), entry=n.get("entry"))
     if t == 2:
         players = obs.get("players_nearby") or []
-        idx = _prompt_int(f"player index [0..{max(len(players)-1,0)}]: ")
+        if not players:
+            print("no Players in last observation; choose (2) to refresh")
+            return None
+        print("indices are 0-based (first item is 0)")
+        idx = _prompt_int(f"player index [0..{len(players)-1}]: ")
+        if idx is not None and idx == len(players):
+            idx -= 1
         if idx is None or idx < 0 or idx >= len(players):
             print("invalid player index")
             return None
@@ -147,8 +171,10 @@ def _goal_menu(obs: Dict[str, Any], selected: Optional[SelectedEntity]) -> Optio
     print("  6) goto npc_entry + interact")
     print("  7) stop moving (idle)")
     print("  8) custom goal text (paste)")
+    print("  9) goto guid (prompt)")
+    print("  10) goto guid + interact (prompt)")
 
-    choice = _prompt_int("choice [1-8]: ")
+    choice = _prompt_int("choice [1-10]: ")
     if choice == 1:
         if not selected:
             print("no selected entity; refresh observation and select one first")
@@ -158,6 +184,9 @@ def _goal_menu(obs: Dict[str, Any], selected: Optional[SelectedEntity]) -> Optio
         entry = _prompt_int("npc_entry: ")
         if entry is None:
             print("invalid entry")
+            return None
+        if entry > 10_000_000:
+            print("that looks like a GUID, not an npc_entry id; use (9) goto guid (prompt) instead")
             return None
         return f"follow npc_entry={entry}"
     if choice == 3:
@@ -170,6 +199,9 @@ def _goal_menu(obs: Dict[str, Any], selected: Optional[SelectedEntity]) -> Optio
         if entry is None:
             print("invalid entry")
             return None
+        if entry > 10_000_000:
+            print("that looks like a GUID, not an npc_entry id; use (9) goto guid (prompt) instead")
+            return None
         return f"goto npc_entry={entry}"
     if choice == 5:
         if not selected:
@@ -181,12 +213,27 @@ def _goal_menu(obs: Dict[str, Any], selected: Optional[SelectedEntity]) -> Optio
         if entry is None:
             print("invalid entry")
             return None
+        if entry > 10_000_000:
+            print("that looks like a GUID, not an npc_entry id; use (10) goto guid + interact instead")
+            return None
         return f"goto npc_entry={entry} interact"
     if choice == 7:
         return "stop moving"
     if choice == 8:
         txt = _prompt("goal text: ").strip()
         return txt or None
+    if choice == 9:
+        guid = _prompt_int("guid: ")
+        if guid is None:
+            print("invalid guid")
+            return None
+        return f"goto guid={guid}"
+    if choice == 10:
+        guid = _prompt_int("guid: ")
+        if guid is None:
+            print("invalid guid")
+            return None
+        return f"goto guid={guid} interact"
     print("invalid choice")
     return None
 
@@ -291,6 +338,12 @@ def run_interactive(client: ControlClient) -> int:
                 # Show status after set so it's obvious it took effect.
                 st = client.request({"op": "status"})
                 print(_pretty(st))
+                if not bool(st.get("enabled")):
+                    print("note: agent is disabled; enable it with (4) or the goal won't execute")
+                if int(st.get("self_guid") or 0) == 0:
+                    print("note: self_guid is 0; move your character a bit (WASD) so the proxy learns your GUID")
+                if not bool(st.get("movement_template_present", True)):
+                    print("note: no movement template yet; move your character a bit (WASD) so injected movement can reuse it")
             elif choice == 6:
                 resp = client.request({"op": "clear_goal"})
                 print(_pretty(resp))
@@ -331,4 +384,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
