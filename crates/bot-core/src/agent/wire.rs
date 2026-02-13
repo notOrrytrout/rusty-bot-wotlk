@@ -104,6 +104,8 @@ pub struct InteractArgs {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CastArgs {
     pub slot: u8,
+    #[serde(default)]
+    pub guid: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -148,6 +150,17 @@ fn validate_cast_slot(slot: u8) -> Result<u8, ToolParseError> {
         ));
     }
     Ok(slot)
+}
+
+fn validate_optional_nonzero_guid(
+    guid: Option<u64>,
+    tool_name: &'static str,
+) -> Result<Option<u64>, ToolParseError> {
+    if let Some(g) = guid {
+        Ok(Some(validate_nonzero_guid(g, tool_name)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn parse_args<T: for<'de> Deserialize<'de>>(
@@ -213,6 +226,7 @@ impl TryFrom<ToolCallWire> for ToolCall {
             "cast" => {
                 let mut args = parse_args::<CastArgs>(wire.arguments, "cast")?;
                 args.slot = validate_cast_slot(args.slot)?;
+                args.guid = validate_optional_nonzero_guid(args.guid, "cast")?;
                 Ok(ToolCall::Cast(args))
             }
             other => Err(ToolParseError::UnsupportedToolName(other.to_string())),
@@ -323,5 +337,12 @@ mod tests {
         let s = "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":0}}</tool_call>";
         let err = parse_tool_call(s).unwrap_err();
         assert!(format!("{err}").contains("slot must be 1..=12"));
+    }
+
+    #[test]
+    fn parse_cast_optional_guid_must_be_nonzero_if_present() {
+        let s = "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1,\"guid\":0}}</tool_call>";
+        let err = parse_tool_call(s).unwrap_err();
+        assert!(format!("{err}").contains("guid must be nonzero"));
     }
 }

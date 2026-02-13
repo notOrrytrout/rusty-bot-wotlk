@@ -255,22 +255,22 @@ Acceptance checks
 
 ### 10) First Real Capabilities (After Framework Is Stable)
 These depend on new packet support + state tracking; keep them blocked until framework above is solid.
-- [ ] Targeting tools:
+ - [ ] Targeting tools:
   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
-  - [ ] Proxy packet injection + completion checks
-  - [ ] `target_guid { guid }`
-  - [ ] `target_nearest_npc { entry?: u32 }`
-- [ ] `interact { guid }` (packet support + completion checks)
+  - [x] Proxy packet injection (v0) for `target_guid` and `target_nearest_npc` (`crates/gateway-proxy/src/proxy.rs`)
+  - [x] `target_guid { guid }` (v0: `CMSG_SET_SELECTION`)
+  - [x] `target_nearest_npc { entry?: u32 }` (v0: chooses nearest from `WorldState`)
+ - [x] `interact { guid }` (packet support + completion checks) (v0: `CMSG_GOSSIP_HELLO`)
+   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+   - [x] Proxy packet injection (v0) for `interact` via `CMSG_GOSSIP_HELLO` (`crates/gateway-proxy/src/proxy.rs`)
+ - [ ] “Follow target” goal v1 (turn + move + stop loops)
+ - [ ] Combat v0 (very crude):
   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
-  - [ ] Proxy packet injection + completion checks
-- [ ] “Follow target” goal v1 (turn + move + stop loops)
-- [ ] Combat v0 (very crude):
-  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
-  - [ ] Proxy packet injection + completion checks
-  - [ ] `cast { slot }`
+  - [x] Proxy packet injection (v0) for `cast` implemented as `CMSG_ATTACKSWING` when `guid` is provided (`crates/gateway-proxy/src/proxy.rs`)
+  - [x] `cast { slot, guid? }` (v0: implemented as attackswing; real cast/use-action is later)
   - [ ] stop moving when combat detected
   - [ ] detect “something happened” via combat log/state deltas
-- [ ] Loot v0 (requires state additions; define later)
+ - [ ] Loot v0 (requires state additions; define later)
 
 ---
 

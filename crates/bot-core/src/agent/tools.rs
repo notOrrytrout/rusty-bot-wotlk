@@ -61,7 +61,7 @@ impl Tool for ToolId {
             ToolId::TargetGuid => "target_guid {\"guid\":123}",
             ToolId::TargetNearestNpc => "target_nearest_npc {\"entry\":123} (entry optional)",
             ToolId::Interact => "interact {\"guid\":123}",
-            ToolId::Cast => "cast {\"slot\":1..12}",
+            ToolId::Cast => "cast {\"slot\":1..12,\"guid\":123} (guid optional)",
         }
     }
 
@@ -212,7 +212,7 @@ mod tests {
             ToolId::TargetGuid => "<tool_call>{\"name\":\"target_guid\",\"arguments\":{\"guid\":42}}</tool_call>",
             ToolId::TargetNearestNpc => "<tool_call>{\"name\":\"target_nearest_npc\",\"arguments\":{}}</tool_call>",
             ToolId::Interact => "<tool_call>{\"name\":\"interact\",\"arguments\":{\"guid\":42}}</tool_call>",
-            ToolId::Cast => "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1}}</tool_call>",
+            ToolId::Cast => "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1,\"guid\":42}}</tool_call>",
         }
     }
 

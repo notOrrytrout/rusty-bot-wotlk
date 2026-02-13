@@ -1456,6 +1456,75 @@ mod control_port_tests {
     }
 }
 
+#[cfg(test)]
+mod tool_packet_tests {
+    use super::*;
+
+    #[test]
+    fn build_set_selection_packet_layout() {
+        let guid = 0x0102030405060708u64;
+        let p = build_cmsg_set_selection(guid);
+        assert_eq!(p.opcode, Opcode::CMSG_SET_SELECTION);
+        assert_eq!(p.body, guid.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn build_gossip_hello_packet_layout() {
+        let guid = 0x0102030405060708u64;
+        let p = build_cmsg_gossip_hello(guid);
+        assert_eq!(p.opcode, Opcode::CMSG_GOSSIP_HELLO);
+        assert_eq!(p.body, guid.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn build_attackswing_packet_uses_packed_guid() {
+        let guid = 0x0102030405060708u64;
+        let p = build_cmsg_attackswing(guid);
+        assert_eq!(p.opcode, Opcode::CMSG_ATTACKSWING);
+        assert_eq!(
+            p.body,
+            vec![0xff, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+    }
+
+    #[test]
+    fn pick_nearest_npc_guid_picks_closest_and_honors_entry_filter() {
+        let mut ws = WorldState::new();
+        let self_guid = 1u64;
+        let mut self_state = PlayerCurrentState::new(self_guid);
+        self_state.position.x = 0.0;
+        self_state.position.y = 0.0;
+        self_state.position.z = 0.0;
+        ws.players.insert(self_guid, self_state);
+
+        let mut npc1 = rusty_bot_core::world::npc_state::NpcCurrentState::new(10, 100);
+        npc1.position.x = 1.0;
+        let mut npc2 = rusty_bot_core::world::npc_state::NpcCurrentState::new(11, 100);
+        npc2.position.x = 2.0;
+        let mut npc3 = rusty_bot_core::world::npc_state::NpcCurrentState::new(12, 200);
+        npc3.position.x = 0.5;
+        ws.npcs.insert(npc1.guid, npc1);
+        ws.npcs.insert(npc2.guid, npc2);
+        ws.npcs.insert(npc3.guid, npc3);
+
+        // No filter: closest overall is npc3.
+        assert_eq!(
+            ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, None),
+            Some(12)
+        );
+        // Filter to entry=100: closest of npc1/npc2 is npc1.
+        assert_eq!(
+            ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, Some(100)),
+            Some(10)
+        );
+        // Filter to missing entry: none.
+        assert_eq!(
+            ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, Some(999)),
+            None
+        );
+    }
+}
+
 async fn record_client_movement_observation(
     packet: &WorldPacket,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
@@ -1753,6 +1822,60 @@ struct ProxyAgentApi {
 }
 
 impl ProxyAgentApi {
+    fn pick_nearest_npc_guid(
+        ws: &WorldState,
+        self_guid: u64,
+        entry: Option<u32>,
+    ) -> Option<u64> {
+        let self_pos = ws.players.get(&self_guid).map(|p| p.position.clone())?;
+        let mut best: Option<(u64, f32)> = None;
+        for npc in ws.npcs.values() {
+            if let Some(entry) = entry {
+                if npc.entry != entry {
+                    continue;
+                }
+            }
+            let dx = npc.position.x - self_pos.x;
+            let dy = npc.position.y - self_pos.y;
+            let dz = npc.position.z - self_pos.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            match best {
+                None => best = Some((npc.guid, dist_sq)),
+                Some((_, best_sq)) if dist_sq < best_sq => best = Some((npc.guid, dist_sq)),
+                _ => {}
+            }
+        }
+        best.map(|(g, _)| g)
+    }
+
+    async fn send_packet(&self, packet: WorldPacket) -> anyhow::Result<AgentToolStatus> {
+        let ok = self
+            .limiter
+            .lock()
+            .await
+            .allow_injection(std::time::Instant::now());
+        if !ok {
+            return Ok(AgentToolStatus::Retryable);
+        }
+
+        let packet = apply_injection_guard(packet, &self.injection_guard).await;
+        let Some(packet) = packet else {
+            return Ok(AgentToolStatus::Retryable);
+        };
+        self.upstream_tx
+            .send(packet.clone())
+            .await
+            .map_err(|_| anyhow::anyhow!("upstream channel closed"))?;
+
+        // Never echo to the client by default for non-movement packets (unsafe). This matches
+        // the existing send_injected_packet behavior for upstream-only opcodes.
+        if self.echo_to_client {
+            let _ = self.downstream_tx.send(packet).await;
+        }
+
+        Ok(AgentToolStatus::Ok)
+    }
+
     fn tool_to_demo_command(tool: &AgentToolCall) -> Vec<String> {
         use rusty_bot_core::agent::wire::{MoveDirection, StopKind, TurnDirection};
         match tool {
@@ -1841,19 +1964,81 @@ impl AgentGameApi for ProxyAgentApi {
                 });
             }
 
-            // Packet support for these is not implemented in the proxy yet.
-            if matches!(
-                tool.call,
-                AgentToolCall::TargetGuid(_)
-                    | AgentToolCall::TargetNearestNpc(_)
-                    | AgentToolCall::Interact(_)
-                    | AgentToolCall::Cast(_)
-            ) {
-                return Ok(AgentToolResult {
-                    status: AgentToolStatus::Failed,
-                    reason: "unsupported_tool_not_implemented".to_string(),
-                    facts: serde_json::json!({ "tool": format!("{:?}", tool.call) }),
-                });
+            match &tool.call {
+                AgentToolCall::TargetGuid(args) => {
+                    let status = self.send_packet(build_cmsg_set_selection(args.guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "set_selection".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": args.guid }),
+                    });
+                }
+                AgentToolCall::TargetNearestNpc(args) => {
+                    let self_guid = self.injection_guard.lock().await.last_self_guid.unwrap_or(0);
+                    let ws = self.world_state.lock().await;
+                    let Some(guid) =
+                        Self::pick_nearest_npc_guid(&ws, self_guid, args.entry)
+                    else {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Failed,
+                            reason: "no_npc_found".to_string(),
+                            facts: serde_json::json!({ "entry": args.entry }),
+                        });
+                    };
+                    drop(ws);
+                    let status = self.send_packet(build_cmsg_set_selection(guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "set_selection".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": guid, "entry": args.entry }),
+                    });
+                }
+                AgentToolCall::Interact(args) => {
+                    let status = self.send_packet(build_cmsg_gossip_hello(args.guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "gossip_hello".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": args.guid }),
+                    });
+                }
+                AgentToolCall::Cast(args) => {
+                    // V0 combat: we don't have action bar state, so "cast" is implemented as a
+                    // best-effort attackswing (autoattack) against an explicitly provided guid.
+                    let Some(guid) = args.guid else {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Failed,
+                            reason: "cast_missing_guid".to_string(),
+                            facts: serde_json::json!({ "slot": args.slot }),
+                        });
+                    };
+                    let status = self.send_packet(build_cmsg_attackswing(guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "attackswing".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": guid, "slot": args.slot, "impl": "attackswing_v0" }),
+                    });
+                }
+                _ => {}
             }
 
             let cmds = Self::tool_to_demo_command(&tool.call);
@@ -2244,6 +2429,38 @@ fn build_cmsg_text_emote(text_emote: u32, emote_num: u32, target_guid: u64) -> W
     body.extend_from_slice(&target_guid.to_le_bytes());
     WorldPacket {
         opcode: Opcode::CMSG_TEXT_EMOTE as u32,
+        body,
+    }
+}
+
+fn build_cmsg_set_selection(target_guid: u64) -> WorldPacket {
+    // WotLK layout: Guid(u64).
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&target_guid.to_le_bytes());
+    WorldPacket {
+        opcode: Opcode::CMSG_SET_SELECTION,
+        body,
+    }
+}
+
+fn build_cmsg_gossip_hello(target_guid: u64) -> WorldPacket {
+    // WotLK layout: Guid(u64).
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&target_guid.to_le_bytes());
+    WorldPacket {
+        opcode: Opcode::CMSG_GOSSIP_HELLO,
+        body,
+    }
+}
+
+fn build_cmsg_attackswing(target_guid: u64) -> WorldPacket {
+    // WotLK layout: PackedGuid.
+    let mut body = Vec::with_capacity(9);
+    let mut cur = Cursor::new(&mut body);
+    // BinWrite impl expects a Seek-able writer. Cursor<Vec<u8>> works.
+    let _ = PackedGuid(target_guid).write_options(&mut cur, Endian::Little, ());
+    WorldPacket {
+        opcode: Opcode::CMSG_ATTACKSWING,
         body,
     }
 }

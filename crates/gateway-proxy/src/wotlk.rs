@@ -25,6 +25,12 @@ pub mod opcode {
 
         // Chat/emote.
         pub const CMSG_TEXT_EMOTE: u32 = 260;
+
+        // Targeting / interaction / combat basics.
+        // Values are for WoW 3.3.5a / TrinityCore-style opcode maps.
+        pub const CMSG_SET_SELECTION: u32 = 0x013D;
+        pub const CMSG_ATTACKSWING: u32 = 0x0141;
+        pub const CMSG_GOSSIP_HELLO: u32 = 0x017B;
     }
 }
 
