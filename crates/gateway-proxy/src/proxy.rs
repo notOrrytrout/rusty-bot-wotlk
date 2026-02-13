@@ -14,6 +14,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rusty_bot_core::agent::ToolCall as AgentToolCall;
 use rusty_bot_core::agent::ToolCallWire as AgentToolCallWire;
 use rusty_bot_core::agent::ToolInvocation as AgentToolInvocation;
@@ -1604,6 +1606,7 @@ async fn record_server_world_observation(
     let mut ws = world_state.lock().await;
     match opcode {
         SMSG_UPDATE_OBJECT => {
+            maybe_dump_update_object(&packet.body);
             if let Err(err) = ws.apply_update_object(&packet.body) {
                 eprintln!(
                     "proxy.world.state.update_object_failed error={err:#} body_len={}",
@@ -1626,6 +1629,36 @@ async fn record_server_world_observation(
         _ => {}
     }
     ws.increment_tick();
+}
+
+fn maybe_dump_update_object(body: &[u8]) {
+    // Debug aid: the current SMSG_UPDATE_OBJECT parser is intentionally incomplete and may
+    // mis-parse some servers/cores. When enabled, dump the first few packets so we can
+    // build fixtures/tests and harden parsing.
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let enabled = std::env::var("RUSTY_BOT_DUMP_UPDATE_OBJECT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let limit: usize = std::env::var("RUSTY_BOT_DUMP_UPDATE_OBJECT_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+    let idx = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if idx > limit {
+        return;
+    }
+
+    let prefix_len = 256usize.min(body.len());
+    let hex_prefix = hex_prefix(&body[..prefix_len], prefix_len);
+    println!(
+        "proxy.world.dump_update_object idx={} len={} hex_prefix={}",
+        idx,
+        body.len(),
+        hex_prefix
+    );
 }
 
 fn try_parse_smsg_messagechat(payload: &[u8]) -> Option<String> {
