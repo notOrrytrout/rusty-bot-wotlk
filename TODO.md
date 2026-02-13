@@ -176,11 +176,11 @@ Acceptance checks
 
 ### 5) LLM Adapter Hardening (Parsing + Guardrails)
 - [x] Strict JSON parse of LLM output into `<tool_call>` -> `ToolInvocation` (validated).
-- [ ] On JSON parse failure:
+- [x] On JSON parse failure:
   - [x] Do not inject anything.
   - [x] Record an error in memory.
   - [x] Reprompt with a tighter instruction and the invalid output included as context (one-shot repair).
-- [ ] Add rate limiting:
+- [x] Add rate limiting:
   - [x] Max LLM calls per minute (`RUSTY_BOT_LLM_MAX_CALLS_PER_MIN`)
   - [x] Max injections per second (`RUSTY_BOT_INJECT_MAX_PER_SEC`)
 - [ ] Add “dangerous action” gate framework (not used in MVP tools, but required for future):
@@ -209,12 +209,12 @@ Acceptance checks
   - [x] Simulate observation deltas and timeouts (`crates/bot-core/src/agent/harness.rs`)
 
 Acceptance checks
-- [ ] `cargo test` workspace passes without a server or client running.
+- [x] `cargo test` workspace passes without a server or client running.
 - [x] A test proves: invalid LLM output => zero injections executed. (`crates/bot-core/src/agent/harness.rs`)
 
 ### 8) Goal System (High-Level Commands)
 - [ ] Add goal input:
-  - [ ] startup env var: `RUSTY_BOT_GOAL`
+  - [x] startup env var: `RUSTY_BOT_GOAL`
   - [x] runtime update (recommended): control port command (`crates/gateway-proxy/src/proxy.rs`)
 - [ ] Define goal lifecycle states:
   - [ ] `active`, `completed`, `blocked`, `aborted`
@@ -224,12 +224,24 @@ Acceptance checks
 Current: raw `opcode_hex body_hex`.
 
 Add a JSON-lines control mode (keep old behavior for manual injection):
-- [ ] `{"cmd":"goal_set","goal":"..."}`
-- [ ] `{"cmd":"agent_pause"}` / `{"cmd":"agent_resume"}`
-- [ ] `{"cmd":"agent_status"}`
+- [x] Define control protocol schema (`serde` enums)
+- [x] Implement JSON parsing (NDJSON, one JSON object per line)
+- [x] Reject invalid control messages (reply `{"ok":false,"error":"..."}`)
+- [ ] Add `version` field for protocol
+
+Agent controls:
+- [x] Pause/resume agent loop (`{"op":"agent_enable","enabled":false|true}`)
+- [x] Set/clear goal (`{"op":"set_goal","goal":"..."}`, `{"op":"clear_goal"}`)
+- [x] Query status (`{"op":"status"}` includes goal + last_error + executor_state)
+- [x] Force emergency stop (disable agent sends stop packets)
+- [ ] Inject manual *tool call* (not raw packet injection)
+- [ ] Query current observation snapshot
+
+Raw injection (existing + kept):
+- [x] Inject raw packet via JSON wrapper (`{"op":"inject","opcode":"0x....","body_hex":"..."}`) or legacy `opcode_hex body_hex`
 
 Acceptance checks
-- [ ] Can query status without a debugger: current goal, last tool, last result, last error.
+- [x] Can query status without a debugger: enabled, current goal, last error, executor state.
 
 ### 10) First Real Capabilities (After Framework Is Stable)
 These depend on new packet support + state tracking; keep them blocked until framework above is solid.
@@ -249,4 +261,4 @@ These depend on new packet support + state tracking; keep them blocked until fra
 ## Notes (Keep Short, Update As We Go)
 - Date: 2026-02-13
 - Workspace: `<repo-root>`
-- Baseline: `cargo test` (workspace) PASS (6 tests) on 2026-02-13
+- Baseline: `cargo test` (workspace) PASS on 2026-02-13
