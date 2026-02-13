@@ -5,7 +5,7 @@ Endpoints:
 - POST /api/generate
 - POST /api/chat
 
-Returns deterministic single-command responses suitable for the bot demo loop.
+Returns deterministic single-command responses suitable for the in-proxy agent loop.
 """
 
 from __future__ import annotations
