@@ -8,6 +8,7 @@
 
 pub mod executor;
 pub mod game_api;
+pub mod goal;
 pub mod harness;
 pub mod r#loop;
 pub mod memory;

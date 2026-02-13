@@ -65,6 +65,10 @@ impl Executor {
         matches!(self.state, ExecutorState::Idle)
     }
 
+    pub fn queued_len(&self) -> usize {
+        self.queue.len()
+    }
+
     pub fn offer_llm_tool(&mut self, tool: ToolInvocation) {
         // V1 behavior: a single "next action" from the LLM. Clear any queued follow-ups,
         // but preserve the currently-running action unless it's continuous movement (which we

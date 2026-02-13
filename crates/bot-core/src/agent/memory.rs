@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 
 use super::ToolInvocation;
+use super::goal::GoalPlan;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +51,8 @@ pub struct AgentMemory {
     missing_self_frames: u32,
     #[serde(skip)]
     idle_frames: u32,
+    #[serde(skip)]
+    pub goal_plan: Option<GoalPlan>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
@@ -67,6 +70,7 @@ impl Default for AgentMemory {
             next_goal_id: 1,
             missing_self_frames: 0,
             idle_frames: 0,
+            goal_plan: None,
             last_error: None,
             history: VecDeque::new(),
             history_limit: 12,
@@ -76,7 +80,9 @@ impl Default for AgentMemory {
 
 impl AgentMemory {
     pub fn set_goal(&mut self, goal: impl Into<String>) {
-        self.goal = Some(goal.into());
+        let goal = goal.into();
+        self.goal_plan = GoalPlan::parse(&goal);
+        self.goal = Some(goal);
         let id = self.next_goal_id;
         self.next_goal_id = self.next_goal_id.saturating_add(1);
         self.goal_id = Some(id);
@@ -93,6 +99,7 @@ impl AgentMemory {
         self.goal_state_reason = None;
         self.missing_self_frames = 0;
         self.idle_frames = 0;
+        self.goal_plan = None;
     }
 
     pub fn complete_goal(&mut self, reason: impl Into<String>) {
@@ -117,14 +124,30 @@ impl AgentMemory {
     }
 
     pub fn record(&mut self, tool: ToolInvocation, result: ToolResult) {
-        self.last_error = match result.status {
+        let status = result.status.clone();
+        self.last_error = match status {
             ToolStatus::Ok => None,
             ToolStatus::Failed | ToolStatus::Retryable => Some(result.reason.clone()),
         };
 
-        self.history.push_back(HistoryEntry { tool, result });
+        // Preserve a copy for goal completion checks below.
+        let tool_for_goal = tool.clone();
+        self.history
+            .push_back(HistoryEntry { tool, result });
         while self.history.len() > self.history_limit {
             self.history.pop_front();
+        }
+
+        // Goal completion: if we're running a goto+interact goal and we successfully interacted,
+        // mark the goal completed.
+        if status == ToolStatus::Ok {
+            if let Some(plan) = self.goal_plan.as_ref() {
+                if plan.wants_interact()
+                    && matches!(tool_for_goal.call, super::ToolCall::Interact(_))
+                {
+                    self.complete_goal("interacted");
+                }
+            }
         }
     }
 

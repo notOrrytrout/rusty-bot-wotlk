@@ -128,6 +128,19 @@ pub async fn tick(
         return Ok(HarnessOutcome::Observed);
     }
 
+    // Goal driver: if the executor is idle and has no queued work, allow a deterministic goal step
+    // to offer the next tool before polling the LLM.
+    if agent.executor.is_idle() && agent.executor.queued_len() == 0 {
+        if agent.memory.goal_state == Some(super::memory::GoalState::Active) {
+            if let Some(plan) = agent.memory.goal_plan.as_mut() {
+                if let Some(tool) = plan.step(&obs) {
+                    agent.executor.offer_llm_tool(tool.clone());
+                    return Ok(HarnessOutcome::Offered { tool });
+                }
+            }
+        }
+    }
+
     // If idle and nothing queued, ask the LLM for the next tool call.
     if agent.executor.is_idle() {
         let mut prompt_str = agent.build_prompt(&obs);
@@ -469,6 +482,39 @@ mod tests {
         assert!(matches!(executed[0].call, ToolCall::RequestMove(_)));
         assert!(matches!(executed[1].call, ToolCall::RequestStop(_)));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn harness_goal_goto_entry_offers_tools_without_llm_poll() -> anyhow::Result<()> {
+        let api = Arc::new(FakeGameApi::default());
+        let llm = Arc::new(FakeLlm::default());
+        let mut agent = AgentLoop::new("system");
+        agent.memory.set_goal("goto npc_entry=55 interact");
+
+        // Observation includes the matching NPC.
+        let mut obs = base_obs(1);
+        obs.npcs_nearby.push(crate::agent::observation::EntitySummary {
+            guid: 9,
+            entry: Some(55),
+            pos: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
+            hp: None,
+        });
+        api.push_observation(obs);
+
+        let now = Instant::now();
+        let out = tick(
+            &mut agent,
+            api.as_ref(),
+            llm.as_ref(),
+            HarnessConfig::default(),
+            now,
+        )
+        .await?;
+
+        // First tool should be targeting, and no LLM prompt should have been made.
+        assert!(matches!(out, HarnessOutcome::Offered { .. }));
+        assert_eq!(llm.prompt_count(), 0);
         Ok(())
     }
 

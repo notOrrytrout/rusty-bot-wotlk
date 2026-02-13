@@ -56,8 +56,8 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 Guiding principle: the LLM chooses *high-level* tool calls; Rust code provides reliability (validation, execution, timeouts, completion checks, retries, safety rails).
 
 MVP high-level goals (first set to support end-to-end):
-- [ ] Follow a moving target (player or NPC).
-- [ ] Go to nearest NPC and interact (start simple: just approach + interact).
+- [x] Follow a moving target (player or NPC). (v0: deterministic goal step with visible target guid/entry)
+- [x] Go to NPC and interact (start simple: approach + interact). (v0: deterministic goal step with visible npc entry/guid)
 - [ ] Kill a target (very crude: target + cast by slot, stop moving in combat).
 - [ ] Loot (requires new observation/state).
 
