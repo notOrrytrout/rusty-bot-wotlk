@@ -25,6 +25,8 @@ DEFAULT_RESPONSE = os.environ.get(
     "move forward",
 )
 
+TOOL_CALLS_ENABLED = os.environ.get("MOCK_OLLAMA_TOOL_CALLS", "").lower() in ("1", "true", "yes")
+
 ROTATING_RESPONSES = [
     "move forward",
     "move left",
@@ -50,6 +52,50 @@ _response_lock = threading.Lock()
 def next_rotating_response() -> str:
     with _response_lock:
         return next(_response_cycle)
+
+
+def format_tool_call(name: str, arguments: dict[str, Any]) -> str:
+    # Match the "amigo-style" wrapper contract:
+    # exactly one tool call block, no extra text.
+    return "<tool_call>\n" + json.dumps({"name": name, "arguments": arguments}) + "\n</tool_call>"
+
+
+def maybe_wrap_tool_call(response: str) -> str:
+    if not TOOL_CALLS_ENABLED:
+        return response
+
+    # If the caller already provided a full tool_call block, preserve it.
+    if "<tool_call>" in response and "</tool_call>" in response:
+        return response
+
+    normalized = " ".join(response.strip().lower().replace("_", " ").split())
+    if normalized.startswith("emote "):
+        key = normalized.split(" ", 1)[1].strip()
+        if key:
+            return format_tool_call("request_emote", {"key": key})
+        return format_tool_call("request_emote", {"key": "wave"})
+
+    mapping: dict[str, tuple[str, dict[str, Any]]] = {
+        "move forward": ("request_move", {"direction": "forward", "duration_ms": 900}),
+        "move backward": ("request_move", {"direction": "backward", "duration_ms": 900}),
+        "move left": ("request_move", {"direction": "left", "duration_ms": 900}),
+        "move right": ("request_move", {"direction": "right", "duration_ms": 900}),
+        "move stop": ("request_stop", {"kind": "move"}),
+        "turn left": ("request_turn", {"direction": "left", "duration_ms": 700}),
+        "turn right": ("request_turn", {"direction": "right", "duration_ms": 700}),
+        "turn stop": ("request_stop", {"kind": "turn"}),
+        "strafe stop": ("request_stop", {"kind": "strafe"}),
+        "jump": ("request_jump", {}),
+        "idle": ("request_idle", {}),
+        "wait": ("request_idle", {}),
+    }
+
+    if normalized in mapping:
+        name, args = mapping[normalized]
+        return format_tool_call(name, args)
+
+    # Fallback: treat unknown as idle to avoid injecting garbage.
+    return format_tool_call("request_idle", {})
 
 
 def now_iso() -> str:
@@ -110,6 +156,8 @@ class Handler(BaseHTTPRequestHandler):
         if "response" not in data and "MOCK_OLLAMA_RESPONSE" not in os.environ:
             response = next_rotating_response()
 
+        response = maybe_wrap_tool_call(response)
+
         if stream:
             self._send_ndjson(
                 [
@@ -146,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
         response = str(data.get("response") or DEFAULT_RESPONSE)
         if "response" not in data and "MOCK_OLLAMA_RESPONSE" not in os.environ:
             response = next_rotating_response()
+
+        response = maybe_wrap_tool_call(response)
 
         if stream:
             self._send_ndjson(

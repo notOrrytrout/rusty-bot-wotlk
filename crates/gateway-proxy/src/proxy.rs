@@ -145,9 +145,10 @@ struct PendingAction {
     cmd: String,
     issued_at: Instant,
     baseline_client_time: Option<u32>,
+    timeout: Duration,
 }
 
-fn action_timeout_for(cmd: &str) -> Duration {
+fn default_action_timeout_for(cmd: &str) -> Duration {
     if cmd.starts_with("emote ") || cmd == "emote" {
         Duration::from_millis(1800)
     } else if matches!(
@@ -159,6 +160,144 @@ fn action_timeout_for(cmd: &str) -> Duration {
     } else {
         Duration::from_millis(900)
     }
+}
+
+#[derive(Debug)]
+struct DemoIntent {
+    cmd: String,
+    timeout: Option<Duration>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ToolCallWire {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+fn extract_tool_call_json(script: &str) -> Option<&str> {
+    let start_tag = "<tool_call>";
+    let end_tag = "</tool_call>";
+    let start = script.find(start_tag)? + start_tag.len();
+    let end = script[start..].find(end_tag)? + start;
+    Some(script[start..end].trim())
+}
+
+fn tool_call_to_demo_intent(call: &ToolCallWire) -> Option<DemoIntent> {
+    let name = call.name.trim().to_ascii_lowercase();
+
+    let duration_from_args = || -> Option<Duration> {
+        let ms = call
+            .arguments
+            .get("duration_ms")
+            .and_then(|v| v.as_u64())?;
+        let clamped = ms.clamp(150, 5_000) as u64;
+        Some(Duration::from_millis(clamped))
+    };
+
+    let direction_from_args = || -> Option<String> {
+        call.arguments
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+    };
+
+    match name.as_str() {
+        "request_idle" => Some(DemoIntent {
+            cmd: "move stop".to_string(),
+            timeout: Some(Duration::from_millis(700)),
+        }),
+        "request_jump" => Some(DemoIntent {
+            cmd: "jump".to_string(),
+            timeout: None,
+        }),
+        "request_emote" => {
+            let key = call
+                .arguments
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("wave")
+                .trim()
+                .to_ascii_lowercase();
+            if key.split_whitespace().count() != 1 {
+                return None;
+            }
+            Some(DemoIntent {
+                cmd: format!("emote {key}"),
+                timeout: None,
+            })
+        }
+        "request_stop" => {
+            let kind = call
+                .arguments
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("move")
+                .trim()
+                .to_ascii_lowercase();
+            let cmd = match kind.as_str() {
+                "move" | "all" => "move stop",
+                "turn" => "turn stop",
+                "strafe" => "strafe stop",
+                _ => return None,
+            };
+            Some(DemoIntent {
+                cmd: cmd.to_string(),
+                timeout: Some(Duration::from_millis(700)),
+            })
+        }
+        "request_move" => {
+            let dir = direction_from_args()?;
+            let cmd = match dir.as_str() {
+                "forward" => "move forward",
+                "backward" => "move backward",
+                "left" => "move left",
+                "right" => "move right",
+                _ => return None,
+            };
+            Some(DemoIntent {
+                cmd: cmd.to_string(),
+                timeout: duration_from_args().or(Some(Duration::from_millis(900))),
+            })
+        }
+        "request_turn" => {
+            let dir = direction_from_args()?;
+            let cmd = match dir.as_str() {
+                "left" => "turn left",
+                "right" => "turn right",
+                _ => return None,
+            };
+            Some(DemoIntent {
+                cmd: cmd.to_string(),
+                timeout: duration_from_args().or(Some(Duration::from_millis(700))),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_demo_intent(script: &str) -> Option<DemoIntent> {
+    if let Some(json_str) = extract_tool_call_json(script) {
+        let call: ToolCallWire = match serde_json::from_str(json_str) {
+            Ok(call) => call,
+            Err(err) => {
+                println!("proxy.bot.demo tool_call_parse_failed error={err}");
+                return None;
+            }
+        };
+        if let Some(intent) = tool_call_to_demo_intent(&call) {
+            return Some(intent);
+        }
+        println!(
+            "proxy.bot.demo tool_call_unsupported name=\"{}\" args={}",
+            call.name,
+            call.arguments
+        );
+        return None;
+    }
+
+    // Backward-compatible: accept a single-line natural language command.
+    sanitize_demo_command(script).map(|cmd| DemoIntent { cmd, timeout: None })
 }
 
 async fn send_injected_packet(
@@ -1263,7 +1402,7 @@ async fn run_demo_llm_injector(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
     let instruction = std::env::var("RUSTY_BOT_LLM_PROMPT").unwrap_or_else(|_| {
-        "Return exactly one command and nothing else. Allowed: move forward, move backward, move left, move right, move stop, strafe stop, turn left, turn right, turn stop, jump, emote wave"
+        "Return exactly one <tool_call> JSON block and nothing else.\n\nAllowed tool calls:\n- request_move {\"direction\":\"forward|backward|left|right\",\"duration_ms\":150..5000}\n- request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}\n- request_stop {\"kind\":\"move|turn|strafe|all\"}\n- request_jump {}\n- request_emote {\"key\":\"wave|hello|bye|cheer|dance|laugh|clap|salute\"}\n\nFormat:\n<tool_call>\n{\"name\":\"request_move\",\"arguments\":{\"direction\":\"forward\",\"duration_ms\":900}}\n</tool_call>"
             .to_string()
     });
     println!("proxy.bot.demo enabled endpoint={endpoint} model={model}");
@@ -1316,7 +1455,7 @@ async fn run_demo_llm_injector(
                 }
                 if completed_reason.is_none()
                     && now.saturating_duration_since(pending.issued_at)
-                        >= action_timeout_for(&pending.cmd)
+                        >= pending.timeout
                 {
                     completed_reason = Some("timeout");
                 }
@@ -1376,10 +1515,12 @@ async fn run_demo_llm_injector(
                     }
                     let issued_at = Instant::now();
                     let mut state = injection_guard.lock().await;
+                    let timeout = default_action_timeout_for(&stop_cmd);
                     state.pending_action = Some(PendingAction {
                         cmd: stop_cmd,
                         issued_at,
                         baseline_client_time: state.last_client_move_time,
+                        timeout,
                     });
                 }
             }
@@ -1532,9 +1673,10 @@ async fn run_demo_llm_injector(
                     .and_then(serde_json::Value::as_str)
             })
             .unwrap_or("");
-        let Some(cmd) = sanitize_demo_command(script) else {
+        let Some(intent) = parse_demo_intent(script) else {
             continue;
         };
+        let cmd = intent.cmd;
         let now = Instant::now();
         if cmd == "jump" {
             if last_jump_at
@@ -1584,12 +1726,16 @@ async fn run_demo_llm_injector(
         last_emitted_at = Some(now);
         {
             let mut state = injection_guard.lock().await;
+            let timeout = intent
+                .timeout
+                .unwrap_or_else(|| default_action_timeout_for(&last_emitted_cmd.clone().unwrap_or_default()));
             state.pending_action = Some(PendingAction {
                 cmd: last_emitted_cmd
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
                 issued_at: now,
                 baseline_client_time: state.last_client_move_time,
+                timeout,
             });
         }
     }

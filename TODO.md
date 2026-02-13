@@ -79,13 +79,13 @@ MVP high-level goals (first set to support end-to-end):
   - [ ] In-proxy process (default: simplest).
   - [ ] Separate runner process (requires a JSON control protocol).
 - [ ] Define the LLM output contract:
-  - [ ] Strict JSON only, exactly one object per turn.
-  - [ ] Must include `schema_version`.
-  - [ ] Must include exactly one tool call (or a single `plan` wrapper).
+  - [ ] Must emit exactly one `<tool_call>...</tool_call>` block and nothing else.
+  - [ ] The JSON inside must be an object: `{"name":"...","arguments":{...}}`.
+  - [ ] Future: add `schema_version` once we move past the demo tool set.
 - [ ] Define tool-call schema (Rust structs + serde):
-  - [ ] `ToolCall { schema_version, tool, args, request_id }`
-  - [ ] `tool` is an enum (or validated string) with a closed set.
-  - [ ] `args` is a per-tool typed struct.
+  - [ ] `ToolCallWire { name, arguments }` (wire format inside `<tool_call>`).
+  - [ ] `name` is validated against a closed set.
+  - [ ] `arguments` is a per-tool typed struct (v1 can parse from JSON value).
 - [ ] Define tool-result schema:
   - [ ] `ToolResult { request_id, status: ok|failed|retryable, reason, facts }`
   - [ ] `facts` is a small JSON map for next-turn context.

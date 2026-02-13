@@ -9,6 +9,7 @@ set -euo pipefail
 # Optional env:
 #   RUSTY_BOT_CONFIG_DIR (default: <repo>/config)
 #   MOCK_OLLAMA_INCLUDE_EMOTES=1 to include emotes in the rotating responses
+#   MOCK_OLLAMA_TOOL_CALLS=1 to emit `<tool_call>{...}</tool_call>` wrapped JSON responses (recommended)
 #   RUSTY_BOT_DEMO=1 (default: 1)
 #   RUSTY_BOT_REAL_CLIENT=1 (default: 1) - required by bot contract if bot is enabled in config
 
