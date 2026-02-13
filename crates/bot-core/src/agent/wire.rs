@@ -86,6 +86,29 @@ pub struct RequestEmoteArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct TargetGuidArgs {
+    pub guid: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct TargetNearestNpcArgs {
+    #[serde(default)]
+    pub entry: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct InteractArgs {
+    pub guid: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CastArgs {
+    pub slot: u8,
+    #[serde(default)]
+    pub guid: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolInvocation {
     pub call: ToolCall,
     #[serde(default)]
@@ -100,10 +123,44 @@ pub enum ToolCall {
     RequestStop(RequestStopArgs),
     RequestJump,
     RequestEmote(RequestEmoteArgs),
+    TargetGuid(TargetGuidArgs),
+    TargetNearestNpc(TargetNearestNpcArgs),
+    Interact(InteractArgs),
+    Cast(CastArgs),
 }
 
 fn clamp_duration_ms(ms: u32) -> u32 {
     ms.clamp(150, 5_000)
+}
+
+fn validate_nonzero_guid(guid: u64, tool_name: &'static str) -> Result<u64, ToolParseError> {
+    if guid == 0 {
+        return Err(ToolParseError::InvalidArguments(format!(
+            "{tool_name}: guid must be nonzero"
+        )));
+    }
+    Ok(guid)
+}
+
+fn validate_cast_slot(slot: u8) -> Result<u8, ToolParseError> {
+    // V0: clamp tool surface to a small, safe actionbar range. This can be expanded later.
+    if slot == 0 || slot > 12 {
+        return Err(ToolParseError::InvalidArguments(
+            "cast: slot must be 1..=12".to_string(),
+        ));
+    }
+    Ok(slot)
+}
+
+fn validate_optional_nonzero_guid(
+    guid: Option<u64>,
+    tool_name: &'static str,
+) -> Result<Option<u64>, ToolParseError> {
+    if let Some(g) = guid {
+        Ok(Some(validate_nonzero_guid(g, tool_name)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn parse_args<T: for<'de> Deserialize<'de>>(
@@ -150,6 +207,27 @@ impl TryFrom<ToolCallWire> for ToolCall {
                     ));
                 }
                 Ok(ToolCall::RequestEmote(args))
+            }
+            "target_guid" => {
+                let mut args = parse_args::<TargetGuidArgs>(wire.arguments, "target_guid")?;
+                args.guid = validate_nonzero_guid(args.guid, "target_guid")?;
+                Ok(ToolCall::TargetGuid(args))
+            }
+            "target_nearest_npc" => {
+                let args =
+                    parse_args::<TargetNearestNpcArgs>(wire.arguments, "target_nearest_npc")?;
+                Ok(ToolCall::TargetNearestNpc(args))
+            }
+            "interact" => {
+                let mut args = parse_args::<InteractArgs>(wire.arguments, "interact")?;
+                args.guid = validate_nonzero_guid(args.guid, "interact")?;
+                Ok(ToolCall::Interact(args))
+            }
+            "cast" => {
+                let mut args = parse_args::<CastArgs>(wire.arguments, "cast")?;
+                args.slot = validate_cast_slot(args.slot)?;
+                args.guid = validate_optional_nonzero_guid(args.guid, "cast")?;
+                Ok(ToolCall::Cast(args))
             }
             other => Err(ToolParseError::UnsupportedToolName(other.to_string())),
         }
@@ -245,5 +323,26 @@ mod tests {
         let inv = parse_tool_call(s).unwrap();
         assert!(inv.confirm);
         assert!(matches!(inv.call, ToolCall::RequestIdle));
+    }
+
+    #[test]
+    fn parse_target_guid_requires_nonzero() {
+        let s = "<tool_call>{\"name\":\"target_guid\",\"arguments\":{\"guid\":0}}</tool_call>";
+        let err = parse_tool_call(s).unwrap_err();
+        assert!(format!("{err}").contains("guid must be nonzero"));
+    }
+
+    #[test]
+    fn parse_cast_slot_range() {
+        let s = "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":0}}</tool_call>";
+        let err = parse_tool_call(s).unwrap_err();
+        assert!(format!("{err}").contains("slot must be 1..=12"));
+    }
+
+    #[test]
+    fn parse_cast_optional_guid_must_be_nonzero_if_present() {
+        let s = "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1,\"guid\":0}}</tool_call>";
+        let err = parse_tool_call(s).unwrap_err();
+        assert!(format!("{err}").contains("guid must be nonzero"));
     }
 }

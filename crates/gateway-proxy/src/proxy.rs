@@ -209,6 +209,9 @@ struct InjectionGuardState {
     last_demo_packet: Option<WorldPacket>,
     last_demo_inject_at: Option<Instant>,
     last_client_correction_at: Option<Instant>,
+    // Any client->server world packet (movement, chat, spell, etc). Used to let the human take
+    // over and prevent the agent from fighting real input.
+    last_human_action_at: Option<Instant>,
     suppressed_count: u32,
     last_self_guid: Option<u64>,
 }
@@ -717,6 +720,14 @@ async fn read_client_world_packets(
         }
         record_auth_boundary_observation(lane, packet_count, packet.opcode, &auth_boundary).await;
         maybe_rewrite_client_auth_session(&mut packet, lane, &auth_rewrite).await;
+
+        // Any packet from the real client counts as "human activity". We use this to temporarily
+        // pause the agent loop so the player can take over without fighting injections.
+        {
+            let mut state = injection_guard.lock().await;
+            state.last_human_action_at = Some(Instant::now());
+        }
+
         record_client_movement_observation(&packet, &injection_guard, &world_state).await;
 
         if suppress_client_movement {
@@ -1456,6 +1467,75 @@ mod control_port_tests {
     }
 }
 
+#[cfg(test)]
+mod tool_packet_tests {
+    use super::*;
+
+    #[test]
+    fn build_set_selection_packet_layout() {
+        let guid = 0x0102030405060708u64;
+        let p = build_cmsg_set_selection(guid);
+        assert_eq!(p.opcode, Opcode::CMSG_SET_SELECTION);
+        assert_eq!(p.body, guid.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn build_gossip_hello_packet_layout() {
+        let guid = 0x0102030405060708u64;
+        let p = build_cmsg_gossip_hello(guid);
+        assert_eq!(p.opcode, Opcode::CMSG_GOSSIP_HELLO);
+        assert_eq!(p.body, guid.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn build_attackswing_packet_uses_packed_guid() {
+        let guid = 0x0102030405060708u64;
+        let p = build_cmsg_attackswing(guid);
+        assert_eq!(p.opcode, Opcode::CMSG_ATTACKSWING);
+        assert_eq!(
+            p.body,
+            vec![0xff, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+    }
+
+    #[test]
+    fn pick_nearest_npc_guid_picks_closest_and_honors_entry_filter() {
+        let mut ws = WorldState::new();
+        let self_guid = 1u64;
+        let mut self_state = PlayerCurrentState::new(self_guid);
+        self_state.position.x = 0.0;
+        self_state.position.y = 0.0;
+        self_state.position.z = 0.0;
+        ws.players.insert(self_guid, self_state);
+
+        let mut npc1 = rusty_bot_core::world::npc_state::NpcCurrentState::new(10, 100);
+        npc1.position.x = 1.0;
+        let mut npc2 = rusty_bot_core::world::npc_state::NpcCurrentState::new(11, 100);
+        npc2.position.x = 2.0;
+        let mut npc3 = rusty_bot_core::world::npc_state::NpcCurrentState::new(12, 200);
+        npc3.position.x = 0.5;
+        ws.npcs.insert(npc1.guid, npc1);
+        ws.npcs.insert(npc2.guid, npc2);
+        ws.npcs.insert(npc3.guid, npc3);
+
+        // No filter: closest overall is npc3.
+        assert_eq!(
+            ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, None),
+            Some(12)
+        );
+        // Filter to entry=100: closest of npc1/npc2 is npc1.
+        assert_eq!(
+            ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, Some(100)),
+            Some(10)
+        );
+        // Filter to missing entry: none.
+        assert_eq!(
+            ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, Some(999)),
+            None
+        );
+    }
+}
+
 async fn record_client_movement_observation(
     packet: &WorldPacket,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
@@ -1753,6 +1833,56 @@ struct ProxyAgentApi {
 }
 
 impl ProxyAgentApi {
+    fn pick_nearest_npc_guid(ws: &WorldState, self_guid: u64, entry: Option<u32>) -> Option<u64> {
+        let self_pos = ws.players.get(&self_guid).map(|p| p.position.clone())?;
+        let mut best: Option<(u64, f32)> = None;
+        for npc in ws.npcs.values() {
+            if let Some(entry) = entry {
+                if npc.entry != entry {
+                    continue;
+                }
+            }
+            let dx = npc.position.x - self_pos.x;
+            let dy = npc.position.y - self_pos.y;
+            let dz = npc.position.z - self_pos.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            match best {
+                None => best = Some((npc.guid, dist_sq)),
+                Some((_, best_sq)) if dist_sq < best_sq => best = Some((npc.guid, dist_sq)),
+                _ => {}
+            }
+        }
+        best.map(|(g, _)| g)
+    }
+
+    async fn send_packet(&self, packet: WorldPacket) -> anyhow::Result<AgentToolStatus> {
+        let ok = self
+            .limiter
+            .lock()
+            .await
+            .allow_injection(std::time::Instant::now());
+        if !ok {
+            return Ok(AgentToolStatus::Retryable);
+        }
+
+        let packet = apply_injection_guard(packet, &self.injection_guard).await;
+        let Some(packet) = packet else {
+            return Ok(AgentToolStatus::Retryable);
+        };
+        self.upstream_tx
+            .send(packet.clone())
+            .await
+            .map_err(|_| anyhow::anyhow!("upstream channel closed"))?;
+
+        // Never echo to the client by default for non-movement packets (unsafe). This matches
+        // the existing send_injected_packet behavior for upstream-only opcodes.
+        if self.echo_to_client {
+            let _ = self.downstream_tx.send(packet).await;
+        }
+
+        Ok(AgentToolStatus::Ok)
+    }
+
     fn tool_to_demo_command(tool: &AgentToolCall) -> Vec<String> {
         use rusty_bot_core::agent::wire::{MoveDirection, StopKind, TurnDirection};
         match tool {
@@ -1785,6 +1915,10 @@ impl ProxyAgentApi {
                     "move stop".to_string(),
                 ],
             },
+            AgentToolCall::TargetGuid(_)
+            | AgentToolCall::TargetNearestNpc(_)
+            | AgentToolCall::Interact(_)
+            | AgentToolCall::Cast(_) => vec![],
         }
     }
 }
@@ -1835,6 +1969,88 @@ impl AgentGameApi for ProxyAgentApi {
                     reason: "confirm_required".to_string(),
                     facts: serde_json::Value::Null,
                 });
+            }
+
+            match &tool.call {
+                AgentToolCall::TargetGuid(args) => {
+                    let status = self
+                        .send_packet(build_cmsg_set_selection(args.guid))
+                        .await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "set_selection".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": args.guid }),
+                    });
+                }
+                AgentToolCall::TargetNearestNpc(args) => {
+                    let self_guid = self
+                        .injection_guard
+                        .lock()
+                        .await
+                        .last_self_guid
+                        .unwrap_or(0);
+                    let ws = self.world_state.lock().await;
+                    let Some(guid) = Self::pick_nearest_npc_guid(&ws, self_guid, args.entry) else {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Failed,
+                            reason: "no_npc_found".to_string(),
+                            facts: serde_json::json!({ "entry": args.entry }),
+                        });
+                    };
+                    drop(ws);
+                    let status = self.send_packet(build_cmsg_set_selection(guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "set_selection".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": guid, "entry": args.entry }),
+                    });
+                }
+                AgentToolCall::Interact(args) => {
+                    let status = self.send_packet(build_cmsg_gossip_hello(args.guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "gossip_hello".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": args.guid }),
+                    });
+                }
+                AgentToolCall::Cast(args) => {
+                    // V0 combat: we don't have action bar state, so "cast" is implemented as a
+                    // best-effort attackswing (autoattack) against an explicitly provided guid.
+                    let Some(guid) = args.guid else {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Failed,
+                            reason: "cast_missing_guid".to_string(),
+                            facts: serde_json::json!({ "slot": args.slot }),
+                        });
+                    };
+                    let status = self.send_packet(build_cmsg_attackswing(guid)).await?;
+                    let reason = if status == AgentToolStatus::Ok {
+                        "attackswing".to_string()
+                    } else {
+                        "retryable".to_string()
+                    };
+                    return Ok(AgentToolResult {
+                        status,
+                        reason,
+                        facts: serde_json::json!({ "guid": guid, "slot": args.slot, "impl": "attackswing_v0" }),
+                    });
+                }
+                _ => {}
             }
 
             let cmds = Self::tool_to_demo_command(&tool.call);
@@ -2001,6 +2217,10 @@ async fn run_agent_llm_injector(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(25);
+    let human_override_ms: u64 = std::env::var("RUSTY_BOT_HUMAN_OVERRIDE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
 
     println!(
         "proxy.bot.agent started enabled={} endpoint={} model={} use_vision={}",
@@ -2038,11 +2258,65 @@ async fn run_agent_llm_injector(
         agent.memory.set_goal(goal);
     }
     let mut enabled = start_enabled;
+    let mut human_override_until: Option<Instant> = None;
+    let mut human_override_active_prev = false;
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 if !enabled {
+                    continue;
+                }
+
+                // Cooperative control: if the player is actively sending packets, pause the agent
+                // for a short window so injected actions do not fight the human.
+                let now_tokio = Instant::now();
+                let last_human = injection_guard.lock().await.last_human_action_at;
+                if let Some(t) = last_human {
+                    let until = t + Duration::from_millis(human_override_ms);
+                    if human_override_until.map(|u| until > u).unwrap_or(true) {
+                        human_override_until = Some(until);
+                    }
+                }
+                let override_active = human_override_until
+                    .map(|u| now_tokio < u)
+                    .unwrap_or(false);
+                if override_active && !human_override_active_prev {
+                    // Best-effort: stop any continuous injected movement so the human has clean control.
+                    // This can be overridden immediately by real client movement packets.
+                    for stop in [
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Turn,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Strafe,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Move,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                    ] {
+                        let _ = api.execute_tool(stop).await;
+                    }
+                    // Reset executor to avoid resuming a partially-queued action as soon as override ends.
+                    agent.executor = rusty_bot_core::agent::executor::Executor::default();
+                }
+                human_override_active_prev = override_active;
+                if override_active {
                     continue;
                 }
 
@@ -2187,6 +2461,11 @@ async fn run_agent_llm_injector(
                             "ok": true,
                             "enabled": enabled,
                             "goal": agent.memory.goal.clone(),
+                            "goal_id": agent.memory.goal_id,
+                            "goal_state": agent.memory.goal_state,
+                            "goal_state_reason": agent.memory.goal_state_reason,
+                            "human_override_ms": human_override_ms,
+                            "human_override_active": human_override_until.map(|u| Instant::now() < u).unwrap_or(false),
                             "last_error": agent.memory.last_error.clone(),
                             "executor_state": format!("{:?}", agent.executor.state),
                             "history_len": agent.memory.history.len(),
@@ -2222,6 +2501,38 @@ fn build_cmsg_text_emote(text_emote: u32, emote_num: u32, target_guid: u64) -> W
     body.extend_from_slice(&target_guid.to_le_bytes());
     WorldPacket {
         opcode: Opcode::CMSG_TEXT_EMOTE as u32,
+        body,
+    }
+}
+
+fn build_cmsg_set_selection(target_guid: u64) -> WorldPacket {
+    // WotLK layout: Guid(u64).
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&target_guid.to_le_bytes());
+    WorldPacket {
+        opcode: Opcode::CMSG_SET_SELECTION,
+        body,
+    }
+}
+
+fn build_cmsg_gossip_hello(target_guid: u64) -> WorldPacket {
+    // WotLK layout: Guid(u64).
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&target_guid.to_le_bytes());
+    WorldPacket {
+        opcode: Opcode::CMSG_GOSSIP_HELLO,
+        body,
+    }
+}
+
+fn build_cmsg_attackswing(target_guid: u64) -> WorldPacket {
+    // WotLK layout: PackedGuid.
+    let mut body = Vec::with_capacity(9);
+    let mut cur = Cursor::new(&mut body);
+    // BinWrite impl expects a Seek-able writer. Cursor<Vec<u8>> works.
+    let _ = PackedGuid(target_guid).write_options(&mut cur, Endian::Little, ());
+    WorldPacket {
+        opcode: Opcode::CMSG_ATTACKSWING,
         body,
     }
 }

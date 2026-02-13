@@ -17,7 +17,7 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 
 ### Observation / World State
 - [x] Server packet observation updates a shared `WorldState` on some opcodes:
-  - `SMSG_UPDATE_OBJECT` -> updates `WorldState` objects (partial implementation). (`crates/gateway-proxy/src/proxy.rs`, `crates/bot-core/src/world/world_state.rs`)
+  - `SMSG_UPDATE_OBJECT` -> updates `WorldState` objects (block count, packed GUIDs, create/values/movement, out-of-range removals; still partial field coverage). (`crates/gateway-proxy/src/proxy.rs`, `crates/bot-core/src/world/world_state.rs`)
   - `SMSG_MESSAGECHAT` -> chat log (basic parsing). (`crates/gateway-proxy/src/proxy.rs`)
   - `SMSG_ATTACKERSTATEUPDATE` -> combat log placeholder message. (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Client movement observation updates the local player position/orientation/timestamp in `WorldState` when movement packets can be parsed. (`crates/gateway-proxy/src/proxy.rs`)
@@ -26,6 +26,7 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 - [x] `rusty-bot-core` crate exists with world model + vision prompt + minimal LLM client. (`crates/bot-core/src/lib.rs`)
 - [x] `WorldState` holds players/NPCs/other players, chat/combat logs, and a tick counter. (`crates/bot-core/src/world/world_state.rs`)
 - [x] `WorldState.apply_update_object()` populates partial fields for:
+  - entity position/orientation/timestamp for create + movement update types (subset of movement formats)
   - player health/max health/level/power type/power/flags
   - visible equipment entries (via visible-item fields)
   - backpack slots (partial)
@@ -56,8 +57,8 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 Guiding principle: the LLM chooses *high-level* tool calls; Rust code provides reliability (validation, execution, timeouts, completion checks, retries, safety rails).
 
 MVP high-level goals (first set to support end-to-end):
-- [ ] Follow a moving target (player or NPC).
-- [ ] Go to nearest NPC and interact (start simple: just approach + interact).
+- [x] Follow a moving target (player or NPC). (v0: deterministic goal step with visible target guid/entry)
+- [x] Go to NPC and interact (start simple: approach + interact). (v0: deterministic goal step with visible npc entry/guid)
 - [ ] Kill a target (very crude: target + cast by slot, stop moving in combat).
 - [ ] Loot (requires new observation/state).
 
@@ -81,6 +82,7 @@ MVP high-level goals (first set to support end-to-end):
   - [x] `RUSTY_BOT_GOAL`
   - [x] `RUSTY_BOT_LLM_MAX_CALLS_PER_MIN`
   - [x] `RUSTY_BOT_INJECT_MAX_PER_SEC`
+  - [x] `RUSTY_BOT_HUMAN_OVERRIDE_MS`
   - [x] `RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT`
   - [x] `RUSTY_BOT_SUPPRESS_CLIENT_MOVEMENT`
 
@@ -97,7 +99,7 @@ MVP high-level goals (first set to support end-to-end):
 - [x] Define tool-result schema:
   - [x] `ToolResult { status: ok|failed|retryable, reason, facts }` (request ids deferred).
   - [x] `facts` is a small JSON map for next-turn context.
-- [ ] Define `Observation` schema (stable JSON; capped lists):
+- [x] Define `Observation` schema (stable JSON; capped lists):
   - [x] Self state summary
   - [x] Nearby entities summary (top N by distance)
   - [x] Last chat lines (cap)
@@ -123,7 +125,7 @@ Add a new module under:
   - [x] Build `Observation` from `WorldState` (v1).
   - [x] Derived facts (delta-based) needed for completion checks (position + movement time deltas).
 - [x] `tools.rs`:
-  - [ ] `Tool` trait + tool registry/dispatcher.
+  - [x] `Tool` trait + tool registry/dispatcher.
   - [x] Tool definitions for MVP movement set (spec helpers: timeout + auto-stop).
 - [x] `executor.rs`:
   - [x] Action queue (single-step from LLM + auto-stop follow-up).
@@ -137,7 +139,7 @@ Add a new module under:
   - [x] Include last tool error + history to help the LLM iterate.
 - [x] `memory.rs`:
   - [x] Short-term memory: last N tool calls/results; last error string.
-  - [ ] Current goal text and a goal id (goal text exists; goal id later).
+  - [x] Current goal text and a goal id (goal text exists; goal id later).
 - [x] Wire into `crates/bot-core/src/lib.rs`.
 
 Acceptance checks
@@ -225,9 +227,9 @@ Acceptance checks
 - [x] Add goal input:
   - [x] startup env var: `RUSTY_BOT_GOAL`
   - [x] runtime update (recommended): control port command (`crates/gateway-proxy/src/proxy.rs`)
-- [ ] Define goal lifecycle states:
-  - [ ] `active`, `completed`, `blocked`, `aborted`
-- [ ] Add goal completion heuristics for the MVP goals.
+- [x] Define goal lifecycle states:
+  - [x] `active`, `completed`, `blocked`, `aborted` (v0 state tracking)
+- [x] Add goal completion heuristics for the MVP goals. (v0 heuristics: stop/idle completion + blocked when self-state missing)
 
 ### 9) Control Port Upgrade (Optional but High Leverage)
 Current: raw `opcode_hex body_hex`.
@@ -255,16 +257,22 @@ Acceptance checks
 
 ### 10) First Real Capabilities (After Framework Is Stable)
 These depend on new packet support + state tracking; keep them blocked until framework above is solid.
-- [ ] Targeting tools:
-  - [ ] `target_guid { guid }`
-  - [ ] `target_nearest_npc { entry?: u32 }`
-- [ ] `interact { guid }` (packet support + completion checks)
-- [ ] “Follow target” goal v1 (turn + move + stop loops)
-- [ ] Combat v0 (very crude):
-  - [ ] `cast { slot }`
-  - [ ] stop moving when combat detected
-  - [ ] detect “something happened” via combat log/state deltas
-- [ ] Loot v0 (requires state additions; define later)
+ - [ ] Targeting tools:
+  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+  - [x] Proxy packet injection (v0) for `target_guid` and `target_nearest_npc` (`crates/gateway-proxy/src/proxy.rs`)
+  - [x] `target_guid { guid }` (v0: `CMSG_SET_SELECTION`)
+  - [x] `target_nearest_npc { entry?: u32 }` (v0: chooses nearest from `WorldState`)
+ - [x] `interact { guid }` (packet support + completion checks) (v0: `CMSG_GOSSIP_HELLO`)
+   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+   - [x] Proxy packet injection (v0) for `interact` via `CMSG_GOSSIP_HELLO` (`crates/gateway-proxy/src/proxy.rs`)
+ - [ ] “Follow target” goal v1 (turn + move + stop loops)
+ - [ ] Combat v0 (very crude):
+  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+  - [x] Proxy packet injection (v0) for `cast` implemented as `CMSG_ATTACKSWING` when `guid` is provided (`crates/gateway-proxy/src/proxy.rs`)
+  - [x] `cast { slot, guid? }` (v0: implemented as attackswing; real cast/use-action is later)
+  - [x] stop moving when combat detected (v0: preempt continuous movement when `derived.in_combat`)
+  - [x] detect “something happened” via combat log/state deltas (v0: `derived.in_combat`)
+ - [ ] Loot v0 (requires state additions; define later)
 
 ---
 
