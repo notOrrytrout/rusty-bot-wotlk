@@ -37,6 +37,7 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 
 ### Control + Demo LLM Loop (Current “Agent” Prototype)
 - [x] Proxy exposes a control TCP port that accepts raw injection lines: `"<opcode_hex> <body_hex>"`. (`crates/gateway-proxy/src/proxy.rs`)
+- [x] Control TCP port also accepts NDJSON control messages for agent commands (`op=status|agent_enable|set_goal|clear_goal|inject`). (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Demo LLM injector loop exists (polls an Ollama-style endpoint on an interval) and injects one discrete command at a time. (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Demo command sanitizer supports (at least): `move forward/backward/left/right`, `move stop`, `turn left/right`, `turn stop`, `strafe stop`, `jump`, `emote <key>` (emotes partial). (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Demo injection uses a real-client movement packet template when available; includes simple time advancement and “emergency stop” behavior on LLM failure. (`crates/gateway-proxy/src/proxy.rs`)
@@ -198,23 +199,23 @@ Acceptance checks
   - [x] Surface `stuck_suspected=true` and a reason (`Observation.derived.stuck_reason`)
 
 ### 7) Testing Harness (So We Can Move Fast Without Regressions)
-- [ ] Unit tests in `rusty-bot-core`:
-  - [ ] ToolCall JSON parsing and validation
-  - [ ] Executor stop-after-continuous behavior
-  - [ ] Retry/backoff logic
-  - [ ] Prompt builder includes tool list + “JSON only”
-- [ ] Add a “dry run” fake `GameApi` for deterministic integration tests:
-  - [ ] Record tool executions
-  - [ ] Simulate observation deltas and timeouts
+- [x] Unit tests in `rusty-bot-core`:
+  - [x] ToolCall JSON parsing and validation (`crates/bot-core/src/agent/wire.rs`)
+  - [x] Executor stop-after-continuous behavior (`crates/bot-core/src/agent/executor.rs`)
+  - [x] Retry/backoff logic (`crates/bot-core/src/agent/executor.rs`)
+  - [ ] Prompt builder includes tool list + “JSON only” (prompt snapshots still TBD)
+- [x] Add a “dry run” fake `GameApi` for deterministic integration tests:
+  - [x] Record tool executions (`crates/bot-core/src/agent/harness.rs`)
+  - [x] Simulate observation deltas and timeouts (`crates/bot-core/src/agent/harness.rs`)
 
 Acceptance checks
 - [ ] `cargo test` workspace passes without a server or client running.
-- [ ] A test proves: invalid LLM output => zero injections executed.
+- [x] A test proves: invalid LLM output => zero injections executed. (`crates/bot-core/src/agent/harness.rs`)
 
 ### 8) Goal System (High-Level Commands)
 - [ ] Add goal input:
   - [ ] startup env var: `RUSTY_BOT_GOAL`
-  - [ ] runtime update (recommended): control port command
+  - [x] runtime update (recommended): control port command (`crates/gateway-proxy/src/proxy.rs`)
 - [ ] Define goal lifecycle states:
   - [ ] `active`, `completed`, `blocked`, `aborted`
 - [ ] Add goal completion heuristics for the MVP goals.

@@ -405,6 +405,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn harness_invalid_llm_output_never_executes_tools() -> anyhow::Result<()> {
+        let api = Arc::new(FakeGameApi::default());
+        let llm = Arc::new(FakeLlm::default());
+        let mut agent = AgentLoop::new("system");
+
+        api.push_observation(base_obs(1));
+        llm.push_response("not a tool call");
+        llm.push_response("still not a tool call");
+
+        let now = Instant::now();
+        let out = tick(
+            &mut agent,
+            api.as_ref(),
+            llm.as_ref(),
+            HarnessConfig::default(),
+            now,
+        )
+        .await?;
+
+        assert!(matches!(out, HarnessOutcome::Observed));
+        assert_eq!(api.executed_tools().len(), 0);
+        assert_eq!(llm.prompt_count(), 2);
+        assert!(agent.memory.last_error.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn harness_stuck_move_fails_and_auto_stops() -> anyhow::Result<()> {
         let api = Arc::new(FakeGameApi::default());
         let llm = Arc::new(FakeLlm::default());
