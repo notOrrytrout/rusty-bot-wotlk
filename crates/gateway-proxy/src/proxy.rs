@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{fs::OpenOptions, io::Write};
 
 use rusty_bot_core::agent::ToolCall as AgentToolCall;
 use rusty_bot_core::agent::ToolCallWire as AgentToolCallWire;
@@ -1612,6 +1613,15 @@ async fn record_server_world_observation(
                     "proxy.world.state.update_object_failed error={err:#} body_len={}",
                     packet.body.len()
                 );
+                if std::env::var("RUSTY_BOT_DUMP_UPDATE_OBJECT")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+                {
+                    append_debug_log_line(&format!(
+                        "proxy.world.state.update_object_failed error={err:#} body_len={}\n",
+                        packet.body.len()
+                    ));
+                }
             }
         }
         SMSG_MESSAGECHAT => {
@@ -1659,6 +1669,29 @@ fn maybe_dump_update_object(body: &[u8]) {
         body.len(),
         hex_prefix
     );
+
+    // Also write to a local .log file for easy sharing/analysis.
+    // Keep this best-effort and non-fatal.
+    let line = format!(
+        "proxy.world.dump_update_object idx={} len={} hex_prefix={}\n",
+        idx,
+        body.len(),
+        hex_prefix
+    );
+    append_debug_log_line(&line);
+}
+
+fn append_debug_log_line(line: &str) {
+    let path = std::env::var("RUSTY_BOT_DEBUG_LOG_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "rusty-bot-debug.log".to_string());
+    let mut f = match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let _ = f.write_all(line.as_bytes());
+    let _ = f.flush();
 }
 
 fn try_parse_smsg_messagechat(payload: &[u8]) -> Option<String> {
