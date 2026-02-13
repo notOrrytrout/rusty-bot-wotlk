@@ -248,4 +248,4 @@ These depend on new packet support + state tracking; keep them blocked until fra
 ## Notes (Keep Short, Update As We Go)
 - Date: 2026-02-13
 - Workspace: `<repo-root>`
-- Baseline: `cargo test` (workspace) PASS (0 tests) on 2026-02-13
+- Baseline: `cargo test` (workspace) PASS (6 tests) on 2026-02-13

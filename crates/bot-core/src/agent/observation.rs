@@ -189,12 +189,8 @@ impl ObservationBuilder {
         obs.derived.client_correction_seen_recently = inputs.client_correction_seen_recently;
 
         if let Some(self_state) = obs.self_state.as_ref() {
-            const MOVE_MASK: u32 = 0x00000001
-                | 0x00000002
-                | 0x00000004
-                | 0x00000008
-                | 0x00000010
-                | 0x00000020;
+            const MOVE_MASK: u32 =
+                0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020;
             obs.derived.moving = (self_state.movement_flags & MOVE_MASK) != 0;
 
             if let Some(prev_pos) = self.last_self_pos {
@@ -242,7 +238,9 @@ impl ObservationBuilder {
                 .map(|d| d != 0)
                 .unwrap_or(false);
             let dist = obs.derived.self_dist_moved;
-            if translating && time_advancing && dist.map(|d| d < STUCK_DIST_EPSILON).unwrap_or(false)
+            if translating
+                && time_advancing
+                && dist.map(|d| d < STUCK_DIST_EPSILON).unwrap_or(false)
             {
                 self.stuck_frames = self.stuck_frames.saturating_add(1);
             } else {
