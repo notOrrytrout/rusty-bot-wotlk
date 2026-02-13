@@ -36,6 +36,7 @@ pub fn build_control_prompt(
         "combat_log": obs.combat_log,
         "derived": obs.derived,
         "goal": mem.goal,
+        "goal_id": mem.goal_id,
         "last_error": mem.last_error,
         "history": mem.history,
     });
@@ -143,6 +144,7 @@ mod tests {
         assert_eq!(v.get("self_guid").and_then(|v| v.as_u64()), Some(42));
         assert!(v.get("derived").is_some());
         assert_eq!(v.get("goal").and_then(|v| v.as_str()), Some("do a thing"));
+        assert_eq!(v.get("goal_id").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(
             v.get("last_error").and_then(|v| v.as_str()),
             Some("bad output")

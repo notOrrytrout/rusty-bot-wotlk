@@ -30,6 +30,10 @@ pub struct HistoryEntry {
 pub struct AgentMemory {
     pub goal: Option<String>,
     #[serde(default)]
+    pub goal_id: Option<u64>,
+    #[serde(skip)]
+    next_goal_id: u64,
+    #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
     pub history: VecDeque<HistoryEntry>,
@@ -40,6 +44,8 @@ impl Default for AgentMemory {
     fn default() -> Self {
         Self {
             goal: None,
+            goal_id: None,
+            next_goal_id: 1,
             last_error: None,
             history: VecDeque::new(),
             history_limit: 12,
@@ -50,10 +56,14 @@ impl Default for AgentMemory {
 impl AgentMemory {
     pub fn set_goal(&mut self, goal: impl Into<String>) {
         self.goal = Some(goal.into());
+        let id = self.next_goal_id;
+        self.next_goal_id = self.next_goal_id.saturating_add(1);
+        self.goal_id = Some(id);
     }
 
     pub fn clear_goal(&mut self) {
         self.goal = None;
+        self.goal_id = None;
     }
 
     pub fn record(&mut self, tool: ToolInvocation, result: ToolResult) {

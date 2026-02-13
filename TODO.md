@@ -97,7 +97,7 @@ MVP high-level goals (first set to support end-to-end):
 - [x] Define tool-result schema:
   - [x] `ToolResult { status: ok|failed|retryable, reason, facts }` (request ids deferred).
   - [x] `facts` is a small JSON map for next-turn context.
-- [ ] Define `Observation` schema (stable JSON; capped lists):
+- [x] Define `Observation` schema (stable JSON; capped lists):
   - [x] Self state summary
   - [x] Nearby entities summary (top N by distance)
   - [x] Last chat lines (cap)
@@ -137,7 +137,7 @@ Add a new module under:
   - [x] Include last tool error + history to help the LLM iterate.
 - [x] `memory.rs`:
   - [x] Short-term memory: last N tool calls/results; last error string.
-  - [ ] Current goal text and a goal id (goal text exists; goal id later).
+  - [x] Current goal text and a goal id (goal text exists; goal id later).
 - [x] Wire into `crates/bot-core/src/lib.rs`.
 
 Acceptance checks
