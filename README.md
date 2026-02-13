@@ -8,12 +8,20 @@ Current shape:
 - **Bot core** (`crates/bot-core/`): shared world model + vision prompt + LLM adapter primitives.
 - **LLM adapter** (`scripts/mock_ollama.py` + env wiring): the LLM speaks a player-level intent language (no opcodes); code translates intents into packets.
 
+## Getting Started
+
+Clone the repo and enter the workspace:
+
+```bash
+git clone https://github.com/notOrrytrout/rusty-bot-wotlk
+cd rusty-bot-wotlk
+```
+
 ## Running (Mock LLM)
 
 This starts a local mock LLM server and the standalone gateway proxy, and also clears stale listeners from previous runs:
 
 ```bash
-cd <repo-root>
 bash scripts/run_runner_with_mock.sh
 ```
 
