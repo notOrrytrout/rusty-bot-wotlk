@@ -119,8 +119,8 @@ Add a new module under:
   - [x] Action queue (single-step from LLM + auto-stop follow-up).
   - [x] Timeouts (scaffold).
   - [ ] Retry policy plumbing (max retries, backoff).
-  - [ ] Mutual exclusion for continuous movement.
-  - [ ] Enforce “stop-after-continuous” even if the LLM forgets.
+  - [ ] Mutual exclusion for continuous movement (or prove it’s already impossible by construction).
+  - [x] Enforce “stop-after-continuous” even if the LLM forgets.
 - [x] `prompt.rs`:
   - [x] Prompt builder using `Observation`, current goal, and allowed tool list (v1).
   - [ ] Hard “JSON only” formatting rules (needs to reflect `<tool_call>` contract, plus stricter guardrails).
@@ -136,19 +136,19 @@ Acceptance checks
 
 ### 3) Tooling MVP (Start Small, Make It Reliable)
 Initial tool set (based on what demo supports today):
-- [ ] `move { direction: forward|backward|left|right, duration_ms }`
-- [ ] `turn { direction: left|right, duration_ms }`
-- [ ] `stop { kind: move|turn|strafe|all }`
-- [ ] `jump {}`
-- [ ] `emote { key }`
+- [x] `request_move { direction: forward|backward|left|right, duration_ms }`
+- [x] `request_turn { direction: left|right, duration_ms }`
+- [x] `request_stop { kind: move|turn|strafe|all }`
+- [x] `request_jump {}`
+- [x] `request_emote { key }`
 
 For each tool:
-- [ ] Validate args strictly (reject unknown enums, clamp duration ranges).
-- [ ] Define completion logic (timeout + minimal observation deltas).
+- [x] Validate args strictly (reject unknown enums, clamp duration ranges).
+- [x] Define completion logic (timeout + minimal observation deltas).
 - [ ] Define retry policy.
 
 Acceptance checks
-- [ ] Continuous tools never leave the character “stuck turning/running” if the LLM hangs (executor must auto-stop).
+- [x] Continuous tools never leave the character “stuck turning/running” if the LLM hangs (executor must auto-stop).
 
 ### 4) Proxy Integration (Implement `GameApi`)
 - [x] Introduce a proxy-side `GameApi` implementation that wraps existing injection channels + world state.
