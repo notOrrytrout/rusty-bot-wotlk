@@ -3,5 +3,6 @@
 *.log
 /tmp
 *.lock
+!Cargo.lock
 __pycache__/
 *.pyc

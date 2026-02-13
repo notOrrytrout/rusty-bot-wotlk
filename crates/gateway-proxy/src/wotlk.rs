@@ -98,11 +98,17 @@ pub mod srp {
         }
 
         pub fn validate_proof(&mut self, server_proof: [u8; 20]) -> bool {
+            let Some(client_proof) = self.client_proof else {
+                // Invalid state: proof was never calculated.
+                // Avoid panicking in production; just treat as a failed validation.
+                return false;
+            };
+
             let client_proof = {
                 let hasher = Sha1::new();
                 let result = hasher
                     .chain(self.public_ephemeral())
-                    .chain(self.client_proof.unwrap())
+                    .chain(client_proof)
                     .chain(self.session_key.clone())
                     .finalize();
 
@@ -186,7 +192,15 @@ pub mod srp {
 
         fn pad_to_32_bytes(bytes: Vec<u8>) -> [u8; 32] {
             let mut buffer = [0u8; 32];
-            buffer[..bytes.len()].copy_from_slice(&bytes);
+            // `BigInt::to_bytes_le()` can, in theory, exceed 32 bytes if the inputs are wrong.
+            // Keep behavior non-panicking; in debug builds, surface the invariant.
+            debug_assert!(
+                bytes.len() <= 32,
+                "expected <=32 bytes, got {}",
+                bytes.len()
+            );
+            let n = bytes.len().min(32);
+            buffer[..n].copy_from_slice(&bytes[..n]);
             buffer
         }
     }
