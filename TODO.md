@@ -81,6 +81,7 @@ MVP high-level goals (first set to support end-to-end):
   - [x] `RUSTY_BOT_GOAL`
   - [x] `RUSTY_BOT_LLM_MAX_CALLS_PER_MIN`
   - [x] `RUSTY_BOT_INJECT_MAX_PER_SEC`
+  - [x] `RUSTY_BOT_HUMAN_OVERRIDE_MS`
   - [x] `RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT`
   - [x] `RUSTY_BOT_SUPPRESS_CLIENT_MOVEMENT`
 

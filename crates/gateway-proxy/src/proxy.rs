@@ -209,6 +209,9 @@ struct InjectionGuardState {
     last_demo_packet: Option<WorldPacket>,
     last_demo_inject_at: Option<Instant>,
     last_client_correction_at: Option<Instant>,
+    // Any client->server world packet (movement, chat, spell, etc). Used to let the human take
+    // over and prevent the agent from fighting real input.
+    last_human_action_at: Option<Instant>,
     suppressed_count: u32,
     last_self_guid: Option<u64>,
 }
@@ -717,6 +720,14 @@ async fn read_client_world_packets(
         }
         record_auth_boundary_observation(lane, packet_count, packet.opcode, &auth_boundary).await;
         maybe_rewrite_client_auth_session(&mut packet, lane, &auth_rewrite).await;
+
+        // Any packet from the real client counts as "human activity". We use this to temporarily
+        // pause the agent loop so the player can take over without fighting injections.
+        {
+            let mut state = injection_guard.lock().await;
+            state.last_human_action_at = Some(Instant::now());
+        }
+
         record_client_movement_observation(&packet, &injection_guard, &world_state).await;
 
         if suppress_client_movement {
@@ -2205,6 +2216,10 @@ async fn run_agent_llm_injector(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(25);
+    let human_override_ms: u64 = std::env::var("RUSTY_BOT_HUMAN_OVERRIDE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
 
     println!(
         "proxy.bot.agent started enabled={} endpoint={} model={} use_vision={}",
@@ -2242,11 +2257,65 @@ async fn run_agent_llm_injector(
         agent.memory.set_goal(goal);
     }
     let mut enabled = start_enabled;
+    let mut human_override_until: Option<Instant> = None;
+    let mut human_override_active_prev = false;
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 if !enabled {
+                    continue;
+                }
+
+                // Cooperative control: if the player is actively sending packets, pause the agent
+                // for a short window so injected actions do not fight the human.
+                let now_tokio = Instant::now();
+                let last_human = injection_guard.lock().await.last_human_action_at;
+                if let Some(t) = last_human {
+                    let until = t + Duration::from_millis(human_override_ms);
+                    if human_override_until.map(|u| until > u).unwrap_or(true) {
+                        human_override_until = Some(until);
+                    }
+                }
+                let override_active = human_override_until
+                    .map(|u| now_tokio < u)
+                    .unwrap_or(false);
+                if override_active && !human_override_active_prev {
+                    // Best-effort: stop any continuous injected movement so the human has clean control.
+                    // This can be overridden immediately by real client movement packets.
+                    for stop in [
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Turn,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Strafe,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Move,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                    ] {
+                        let _ = api.execute_tool(stop).await;
+                    }
+                    // Reset executor to avoid resuming a partially-queued action as soon as override ends.
+                    agent.executor = rusty_bot_core::agent::executor::Executor::default();
+                }
+                human_override_active_prev = override_active;
+                if override_active {
                     continue;
                 }
 
@@ -2394,6 +2463,8 @@ async fn run_agent_llm_injector(
                             "goal_id": agent.memory.goal_id,
                             "goal_state": agent.memory.goal_state,
                             "goal_state_reason": agent.memory.goal_state_reason,
+                            "human_override_ms": human_override_ms,
+                            "human_override_active": human_override_until.map(|u| Instant::now() < u).unwrap_or(false),
                             "last_error": agent.memory.last_error.clone(),
                             "executor_state": format!("{:?}", agent.executor.state),
                             "history_len": agent.memory.history.len(),
