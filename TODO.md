@@ -123,7 +123,7 @@ Add a new module under:
   - [x] Build `Observation` from `WorldState` (v1).
   - [x] Derived facts (delta-based) needed for completion checks (position + movement time deltas).
 - [x] `tools.rs`:
-  - [ ] `Tool` trait + tool registry/dispatcher.
+  - [x] `Tool` trait + tool registry/dispatcher.
   - [x] Tool definitions for MVP movement set (spec helpers: timeout + auto-stop).
 - [x] `executor.rs`:
   - [x] Action queue (single-step from LLM + auto-stop follow-up).

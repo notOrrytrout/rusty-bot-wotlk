@@ -4,6 +4,89 @@ use super::memory::ToolResult;
 use super::wire::{RequestMoveArgs, RequestStopArgs, RequestTurnArgs, StopKind};
 use super::{ToolCall, ToolInvocation};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolId {
+    RequestMove,
+    RequestTurn,
+    RequestStop,
+    RequestJump,
+    RequestEmote,
+    RequestIdle,
+}
+
+pub trait Tool {
+    fn id(&self) -> ToolId;
+    fn name(&self) -> &'static str;
+    fn prompt_signature(&self) -> &'static str;
+    fn is_continuous(&self) -> bool;
+    fn requires_confirm(&self) -> bool;
+}
+
+impl Tool for ToolId {
+    fn id(&self) -> ToolId {
+        *self
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            ToolId::RequestMove => "request_move",
+            ToolId::RequestTurn => "request_turn",
+            ToolId::RequestStop => "request_stop",
+            ToolId::RequestJump => "request_jump",
+            ToolId::RequestEmote => "request_emote",
+            ToolId::RequestIdle => "request_idle",
+        }
+    }
+
+    fn prompt_signature(&self) -> &'static str {
+        match self {
+            ToolId::RequestMove => {
+                "request_move {\"direction\":\"forward|backward|left|right\",\"duration_ms\":150..5000}"
+            }
+            ToolId::RequestTurn => "request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}",
+            ToolId::RequestStop => "request_stop {\"kind\":\"move|turn|strafe|all\"}",
+            ToolId::RequestJump => "request_jump {}",
+            ToolId::RequestEmote => {
+                "request_emote {\"key\":\"wave|hello|bye|cheer|dance|laugh|clap|salute\"}"
+            }
+            ToolId::RequestIdle => "request_idle {}",
+        }
+    }
+
+    fn is_continuous(&self) -> bool {
+        matches!(self, ToolId::RequestMove | ToolId::RequestTurn)
+    }
+
+    fn requires_confirm(&self) -> bool {
+        // Movement/emotes are always safe. This is scaffolding for future destructive tools (vendor, delete, mail, etc).
+        false
+    }
+}
+
+static TOOL_REGISTRY: &[ToolId] = &[
+    ToolId::RequestMove,
+    ToolId::RequestTurn,
+    ToolId::RequestStop,
+    ToolId::RequestJump,
+    ToolId::RequestEmote,
+    ToolId::RequestIdle,
+];
+
+pub fn registry() -> &'static [ToolId] {
+    TOOL_REGISTRY
+}
+
+pub fn tool_list_text() -> String {
+    let mut out = String::from("Allowed tool calls:\n");
+    for tool in registry() {
+        out.push_str("- ");
+        out.push_str(tool.prompt_signature());
+        out.push('\n');
+    }
+    // Preserve the historical formatting with no trailing newline at the end of the section.
+    out.trim_end().to_string()
+}
+
 pub trait ToolMeta {
     fn is_continuous(&self) -> bool;
     fn default_timeout(&self) -> Duration;
@@ -29,8 +112,19 @@ impl ToolMeta for ToolInvocation {
     }
 }
 
+pub fn tool_id_for_call(tool: &ToolCall) -> ToolId {
+    match tool {
+        ToolCall::RequestMove(_) => ToolId::RequestMove,
+        ToolCall::RequestTurn(_) => ToolId::RequestTurn,
+        ToolCall::RequestStop(_) => ToolId::RequestStop,
+        ToolCall::RequestJump => ToolId::RequestJump,
+        ToolCall::RequestEmote(_) => ToolId::RequestEmote,
+        ToolCall::RequestIdle => ToolId::RequestIdle,
+    }
+}
+
 pub fn is_continuous(tool: &ToolCall) -> bool {
-    matches!(tool, ToolCall::RequestMove(_) | ToolCall::RequestTurn(_))
+    tool_id_for_call(tool).is_continuous()
 }
 
 pub fn default_timeout(tool: &ToolCall) -> Duration {
@@ -67,8 +161,7 @@ pub fn auto_stop_after(tool: &ToolCall) -> Option<ToolInvocation> {
 }
 
 pub fn requires_confirm(_tool: &ToolCall) -> bool {
-    // Movement/emotes are always safe. This is scaffolding for future destructive tools (vendor, delete, mail, etc).
-    false
+    tool_id_for_call(_tool).requires_confirm()
 }
 
 pub fn ok(reason: impl Into<String>) -> ToolResult {
@@ -76,5 +169,45 @@ pub fn ok(reason: impl Into<String>) -> ToolResult {
         status: super::memory::ToolStatus::Ok,
         reason: reason.into(),
         facts: serde_json::Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::parse_tool_call;
+
+    fn sample_call_for(tool: ToolId) -> &'static str {
+        match tool {
+            ToolId::RequestMove => "<tool_call>{\"name\":\"request_move\",\"arguments\":{\"direction\":\"forward\",\"duration_ms\":200}}</tool_call>",
+            ToolId::RequestTurn => "<tool_call>{\"name\":\"request_turn\",\"arguments\":{\"direction\":\"left\",\"duration_ms\":200}}</tool_call>",
+            ToolId::RequestStop => "<tool_call>{\"name\":\"request_stop\",\"arguments\":{\"kind\":\"all\"}}</tool_call>",
+            ToolId::RequestJump => "<tool_call>{\"name\":\"request_jump\",\"arguments\":{}}</tool_call>",
+            ToolId::RequestEmote => "<tool_call>{\"name\":\"request_emote\",\"arguments\":{\"key\":\"wave\"}}</tool_call>",
+            ToolId::RequestIdle => "<tool_call>{\"name\":\"request_idle\",\"arguments\":{}}</tool_call>",
+        }
+    }
+
+    #[test]
+    fn registry_tool_signatures_parse_via_wire_contract() {
+        for tool in registry() {
+            let raw = sample_call_for(*tool);
+            let inv = parse_tool_call(raw).unwrap_or_else(|e| {
+                panic!("tool {} should parse, got {e:#}", tool.name())
+            });
+            assert_eq!(tool_id_for_call(&inv.call), *tool);
+        }
+    }
+
+    #[test]
+    fn tool_list_text_includes_every_registry_signature() {
+        let text = tool_list_text();
+        for tool in registry() {
+            assert!(
+                text.contains(tool.prompt_signature()),
+                "missing signature for {}",
+                tool.name()
+            );
+        }
     }
 }

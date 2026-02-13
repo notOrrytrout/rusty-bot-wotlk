@@ -2,6 +2,7 @@ use serde_json::json;
 
 use super::memory::AgentMemory;
 use super::observation::Observation;
+use super::tools;
 
 #[derive(Debug, Clone)]
 pub struct PromptConfig {
@@ -14,7 +15,7 @@ impl Default for PromptConfig {
         Self {
             tool_call_contract: "Return exactly one <tool_call>...</tool_call> block and nothing else.\nInside the block, return JSON object: {\"name\":\"...\",\"arguments\":{...}} (optional: \"confirm\": true).\nDo not include markdown, code fences, or any other text.\n\nFormat:\n<tool_call>\n{\"name\":\"request_idle\",\"arguments\":{}}\n</tool_call>"
                 .to_string(),
-            tool_list: "Allowed tool calls:\n- request_move {\"direction\":\"forward|backward|left|right\",\"duration_ms\":150..5000}\n- request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}\n- request_stop {\"kind\":\"move|turn|strafe|all\"}\n- request_jump {}\n- request_emote {\"key\":\"wave|hello|bye|cheer|dance|laugh|clap|salute\"}\n- request_idle {}".to_string(),
+            tool_list: tools::tool_list_text(),
         }
     }
 }
