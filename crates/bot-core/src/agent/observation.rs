@@ -13,6 +13,10 @@ pub struct Vec3 {
 pub struct DerivedFacts {
     /// True if the player appears to be moving or turning based on movement flags.
     pub moving: bool,
+    /// Best-effort combat indicator. V0 heuristic: true for a short window after combat-related
+    /// server packets were observed and appended to `WorldState.combat_log`.
+    #[serde(default)]
+    pub in_combat: bool,
     /// True if we have observed the real client correcting an injected movement template recently.
     #[serde(default)]
     pub client_correction_seen_recently: bool,
@@ -181,12 +185,28 @@ pub struct ObservationBuilder {
     last_orient: Option<f32>,
     last_movement_time: Option<u64>,
     stuck_frames: u32,
+    last_combat_log_len: usize,
+    last_combat_tick: Option<u64>,
 }
 
 impl ObservationBuilder {
     pub fn build(&mut self, world: &WorldState, inputs: ObservationInputs) -> Observation {
         let mut obs = Observation::from_world(world, inputs.self_guid);
         obs.derived.client_correction_seen_recently = inputs.client_correction_seen_recently;
+
+        // Combat heuristic: if combat log has grown recently, treat us as "in combat" for a short window.
+        // This is intentionally crude until we have structured combat state from packets/auras.
+        let combat_len = world.combat_log.len();
+        if combat_len > self.last_combat_log_len {
+            self.last_combat_tick = Some(world.tick.0);
+        }
+        self.last_combat_log_len = combat_len;
+
+        const COMBAT_RECENT_TICKS: u64 = 50;
+        obs.derived.in_combat = self
+            .last_combat_tick
+            .map(|t| world.tick.0.saturating_sub(t) <= COMBAT_RECENT_TICKS)
+            .unwrap_or(false);
 
         if let Some(self_state) = obs.self_state.as_ref() {
             const MOVE_MASK: u32 =

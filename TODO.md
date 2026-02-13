@@ -103,7 +103,7 @@ MVP high-level goals (first set to support end-to-end):
   - [x] Last chat lines (cap)
   - [x] Last combat lines (cap)
   - [x] Derived flags: `moving`, `stuck_suspected` (and deltas for completion checks)
-  - [ ] Derived flags: `in_combat` (placeholder until supported)
+  - [x] Derived flags: `in_combat` (v0 heuristic; will improve with real combat state)
 - [x] Define a `GameApi` trait boundary (agent calls this; proxy implements it):
   - [x] “Inject action” surface (prefer high-level, not opcodes)
   - [x] “Read observation inputs” surface (world snapshot)
