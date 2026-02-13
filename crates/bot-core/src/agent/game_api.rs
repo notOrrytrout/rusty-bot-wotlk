@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use super::ToolCall;
+use super::ToolInvocation;
 use super::memory::ToolResult;
 use super::observation::Observation;
 
@@ -15,6 +15,6 @@ pub trait GameApi: Send + Sync {
 
     fn execute_tool<'a>(
         &'a self,
-        tool: ToolCall,
+        tool: ToolInvocation,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + 'a>>;
 }

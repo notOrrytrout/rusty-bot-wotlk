@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use super::ToolCall;
+use super::ToolInvocation;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -22,7 +22,7 @@ pub struct ToolResult {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct HistoryEntry {
-    pub tool: ToolCall,
+    pub tool: ToolInvocation,
     pub result: ToolResult,
 }
 
@@ -56,7 +56,7 @@ impl AgentMemory {
         self.goal = None;
     }
 
-    pub fn record(&mut self, tool: ToolCall, result: ToolResult) {
+    pub fn record(&mut self, tool: ToolInvocation, result: ToolResult) {
         self.last_error = match result.status {
             ToolStatus::Ok => None,
             ToolStatus::Failed | ToolStatus::Retryable => Some(result.reason.clone()),

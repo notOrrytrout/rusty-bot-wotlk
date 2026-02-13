@@ -8,6 +8,8 @@ pub const TOOL_CALL_END: &str = "</tool_call>";
 pub struct ToolCallWire {
     pub name: String,
     #[serde(default)]
+    pub confirm: bool,
+    #[serde(default)]
     pub arguments: serde_json::Value,
 }
 
@@ -84,6 +86,13 @@ pub struct RequestEmoteArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ToolInvocation {
+    pub call: ToolCall,
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum ToolCall {
     RequestIdle,
     RequestMove(RequestMoveArgs),
@@ -147,6 +156,20 @@ impl TryFrom<ToolCallWire> for ToolCall {
     }
 }
 
+impl TryFrom<ToolCallWire> for ToolInvocation {
+    type Error = ToolParseError;
+
+    fn try_from(wire: ToolCallWire) -> Result<Self, Self::Error> {
+        let confirm = wire.confirm;
+        let call = ToolCall::try_from(ToolCallWire {
+            name: wire.name,
+            confirm,
+            arguments: wire.arguments,
+        })?;
+        Ok(Self { call, confirm })
+    }
+}
+
 /// Extracts the JSON inside the first `<tool_call>...</tool_call>` block.
 ///
 /// If there are multiple blocks, returns `None` so the caller can treat it as invalid.
@@ -170,15 +193,15 @@ pub fn extract_tool_call_json(script: &str) -> Option<String> {
 /// Contract:
 /// - Exactly one `<tool_call>...</tool_call>` block
 /// - The JSON is an object `{ "name": "...", "arguments": { ... } }`
-pub fn parse_tool_call(script: &str) -> anyhow::Result<ToolCall> {
+pub fn parse_tool_call(script: &str) -> anyhow::Result<ToolInvocation> {
     let json_str = extract_tool_call_json(script).ok_or(ToolParseError::MissingToolCallBlock)?;
 
     let wire: ToolCallWire = serde_json::from_str(&json_str)
         .map_err(|_| ToolParseError::InvalidJson)
         .with_context(|| format!("tool_call_json={json_str}"))?;
 
-    let call = ToolCall::try_from(wire)?;
-    Ok(call)
+    let invocation = ToolInvocation::try_from(wire)?;
+    Ok(invocation)
 }
 
 #[cfg(test)]
@@ -201,8 +224,8 @@ mod tests {
     #[test]
     fn parse_move_clamps_duration() {
         let s = "<tool_call>{\"name\":\"request_move\",\"arguments\":{\"direction\":\"forward\",\"duration_ms\":999999}}</tool_call>";
-        let call = parse_tool_call(s).unwrap();
-        match call {
+        let inv = parse_tool_call(s).unwrap();
+        match inv.call {
             ToolCall::RequestMove(args) => assert_eq!(args.duration_ms, 5_000),
             _ => panic!("expected move"),
         }
@@ -213,5 +236,14 @@ mod tests {
         let s = "<tool_call>{\"name\":\"request_emote\",\"arguments\":{\"key\":\"wave now\"}}</tool_call>";
         let err = parse_tool_call(s).unwrap_err();
         assert!(format!("{err}").contains("key must be a single word"));
+    }
+
+    #[test]
+    fn parse_confirm_flag() {
+        let s =
+            "<tool_call>{\"name\":\"request_idle\",\"confirm\":true,\"arguments\":{}}</tool_call>";
+        let inv = parse_tool_call(s).unwrap();
+        assert!(inv.confirm);
+        assert!(matches!(inv.call, ToolCall::RequestIdle));
     }
 }

@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use rusty_bot_core::agent::ToolCall as AgentToolCall;
+use rusty_bot_core::agent::ToolInvocation as AgentToolInvocation;
 use rusty_bot_core::agent::game_api::GameApi as AgentGameApi;
 use rusty_bot_core::agent::r#loop::AgentLoop;
 use rusty_bot_core::agent::memory::{ToolResult as AgentToolResult, ToolStatus as AgentToolStatus};
@@ -1438,6 +1439,7 @@ async fn run_demo_llm_injector(
         downstream_tx.clone(),
         injection_guard.clone(),
         echo_to_client,
+        None,
     );
 
     let client = reqwest::Client::builder()
@@ -1532,6 +1534,7 @@ async fn run_demo_llm_injector(
                 }
                 Ok(InjectCommandOutcome::Suppressed) => continue,
                 Ok(InjectCommandOutcome::MissingTemplate) => continue,
+                Ok(InjectCommandOutcome::RateLimited) => continue,
                 Err(err) => {
                     eprintln!("proxy.bot.demo stop_send_failed error={err:#}");
                     return Ok(());
@@ -1689,6 +1692,7 @@ async fn run_demo_llm_injector(
                 }
                 continue;
             }
+            Ok(InjectCommandOutcome::RateLimited) => continue,
             Err(err) => {
                 eprintln!("proxy.bot.demo send_failed error={err:#}");
                 return Ok(());
@@ -1721,6 +1725,60 @@ enum InjectCommandOutcome {
     Injected { opcode: u32, body_len: usize },
     Suppressed,
     MissingTemplate,
+    RateLimited,
+}
+
+#[derive(Debug)]
+struct RateLimiter {
+    llm_calls: std::collections::VecDeque<std::time::Instant>,
+    injections: std::collections::VecDeque<std::time::Instant>,
+    max_llm_calls_per_min: usize,
+    max_injections_per_sec: usize,
+}
+
+impl RateLimiter {
+    fn new(max_llm_calls_per_min: usize, max_injections_per_sec: usize) -> Self {
+        Self {
+            llm_calls: std::collections::VecDeque::new(),
+            injections: std::collections::VecDeque::new(),
+            max_llm_calls_per_min,
+            max_injections_per_sec,
+        }
+    }
+
+    fn allow_llm_call(&mut self, now: std::time::Instant) -> bool {
+        let window = Duration::from_secs(60);
+        while self
+            .llm_calls
+            .front()
+            .map(|t| now.saturating_duration_since(*t) > window)
+            .unwrap_or(false)
+        {
+            self.llm_calls.pop_front();
+        }
+        if self.llm_calls.len() >= self.max_llm_calls_per_min {
+            return false;
+        }
+        self.llm_calls.push_back(now);
+        true
+    }
+
+    fn allow_injection(&mut self, now: std::time::Instant) -> bool {
+        let window = Duration::from_secs(1);
+        while self
+            .injections
+            .front()
+            .map(|t| now.saturating_duration_since(*t) > window)
+            .unwrap_or(false)
+        {
+            self.injections.pop_front();
+        }
+        if self.injections.len() >= self.max_injections_per_sec {
+            return false;
+        }
+        self.injections.push_back(now);
+        true
+    }
 }
 
 struct MovementTemplateInjector {
@@ -1728,6 +1786,7 @@ struct MovementTemplateInjector {
     downstream_tx: mpsc::Sender<WorldPacket>,
     injection_guard: Arc<Mutex<InjectionGuardState>>,
     echo_to_client: bool,
+    limiter: Option<Arc<Mutex<RateLimiter>>>,
 }
 
 impl MovementTemplateInjector {
@@ -1736,12 +1795,14 @@ impl MovementTemplateInjector {
         downstream_tx: mpsc::Sender<WorldPacket>,
         injection_guard: Arc<Mutex<InjectionGuardState>>,
         echo_to_client: bool,
+        limiter: Option<Arc<Mutex<RateLimiter>>>,
     ) -> Self {
         Self {
             upstream_tx,
             downstream_tx,
             injection_guard,
             echo_to_client,
+            limiter,
         }
     }
 
@@ -1763,6 +1824,15 @@ impl MovementTemplateInjector {
     }
 
     async fn send(&self, packet: WorldPacket) -> anyhow::Result<()> {
+        if let Some(limiter) = self.limiter.as_ref() {
+            let ok = limiter
+                .lock()
+                .await
+                .allow_injection(std::time::Instant::now());
+            if !ok {
+                anyhow::bail!("rate_limited");
+            }
+        }
         send_injected_packet(
             packet,
             &self.upstream_tx,
@@ -1785,7 +1855,13 @@ impl MovementTemplateInjector {
         };
         let opcode = packet.opcode;
         let body_len = packet.body.len();
-        self.send(packet).await?;
+        match self.send(packet).await {
+            Ok(()) => {}
+            Err(err) if format!("{err:#}").contains("rate_limited") => {
+                return Ok(InjectCommandOutcome::RateLimited);
+            }
+            Err(err) => return Err(err),
+        }
         Ok(InjectCommandOutcome::Injected { opcode, body_len })
     }
 }
@@ -1797,6 +1873,7 @@ struct ProxyAgentApi {
     world_state: Arc<Mutex<WorldState>>,
     observation_builder: Mutex<AgentObservationBuilder>,
     echo_to_client: bool,
+    limiter: Arc<Mutex<RateLimiter>>,
 }
 
 impl ProxyAgentApi {
@@ -1862,12 +1939,20 @@ impl AgentGameApi for ProxyAgentApi {
 
     fn execute_tool<'a>(
         &'a self,
-        tool: AgentToolCall,
+        tool: AgentToolInvocation,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<AgentToolResult>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let cmds = Self::tool_to_demo_command(&tool);
+            if tool.requires_confirm() && !tool.confirm {
+                return Ok(AgentToolResult {
+                    status: AgentToolStatus::Failed,
+                    reason: "confirm_required".to_string(),
+                    facts: serde_json::Value::Null,
+                });
+            }
+
+            let cmds = Self::tool_to_demo_command(&tool.call);
             if cmds.is_empty() {
                 return Ok(AgentToolResult {
                     status: AgentToolStatus::Failed,
@@ -1881,6 +1966,7 @@ impl AgentGameApi for ProxyAgentApi {
                 self.downstream_tx.clone(),
                 self.injection_guard.clone(),
                 self.echo_to_client,
+                Some(self.limiter.clone()),
             );
             for cmd in cmds {
                 match injector.inject_command(&cmd).await? {
@@ -1896,6 +1982,13 @@ impl AgentGameApi for ProxyAgentApi {
                         return Ok(AgentToolResult {
                             status: AgentToolStatus::Retryable,
                             reason: "missing_movement_template".to_string(),
+                            facts: serde_json::json!({ "cmd": cmd }),
+                        });
+                    }
+                    InjectCommandOutcome::RateLimited => {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Retryable,
+                            reason: "rate_limited".to_string(),
                             facts: serde_json::json!({ "cmd": cmd }),
                         });
                     }
@@ -1939,9 +2032,21 @@ async fn run_agent_llm_injector(
     let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
+    let max_llm_calls_per_min: usize = std::env::var("RUSTY_BOT_LLM_MAX_CALLS_PER_MIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let max_injections_per_sec: usize = std::env::var("RUSTY_BOT_INJECT_MAX_PER_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25);
 
     println!("proxy.bot.agent enabled endpoint={endpoint} model={model} use_vision={use_vision}");
 
+    let limiter = Arc::new(Mutex::new(RateLimiter::new(
+        max_llm_calls_per_min,
+        max_injections_per_sec,
+    )));
     let api = ProxyAgentApi {
         upstream_tx,
         downstream_tx,
@@ -1949,6 +2054,7 @@ async fn run_agent_llm_injector(
         world_state: world_state.clone(),
         observation_builder: Mutex::new(AgentObservationBuilder::default()),
         echo_to_client,
+        limiter: limiter.clone(),
     };
 
     let client = reqwest::Client::builder()
@@ -1961,6 +2067,8 @@ async fn run_agent_llm_injector(
     if let Some(goal) = goal {
         agent.memory.set_goal(goal);
     }
+
+    let repair_instruction = "Your previous response was invalid.\nReturn exactly one <tool_call>...</tool_call> block and nothing else.\nThe JSON must be an object with keys: name, arguments (and optional confirm).\n";
 
     loop {
         tick.tick().await;
@@ -2019,6 +2127,15 @@ async fn run_agent_llm_injector(
                 prompt_str.push_str(&vision);
             }
 
+            // LLM call rate limiting.
+            let llm_call_ok = limiter
+                .lock()
+                .await
+                .allow_llm_call(std::time::Instant::now());
+            if !llm_call_ok {
+                continue;
+            }
+
             let response = match client
                 .post(&endpoint)
                 .json(&serde_json::json!({
@@ -2034,15 +2151,30 @@ async fn run_agent_llm_injector(
                     eprintln!("proxy.bot.agent poll_failed error={err:#}");
                     // When the LLM is down, do not keep issuing movement. Prefer hard stops.
                     for stop in [
-                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs {
-                            kind: rusty_bot_core::agent::wire::StopKind::Turn,
-                        }),
-                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs {
-                            kind: rusty_bot_core::agent::wire::StopKind::Strafe,
-                        }),
-                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs {
-                            kind: rusty_bot_core::agent::wire::StopKind::Move,
-                        }),
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Turn,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Strafe,
+                                },
+                            ),
+                            confirm: false,
+                        },
+                        AgentToolInvocation {
+                            call: AgentToolCall::RequestStop(
+                                rusty_bot_core::agent::wire::RequestStopArgs {
+                                    kind: rusty_bot_core::agent::wire::StopKind::Move,
+                                },
+                            ),
+                            confirm: false,
+                        },
                     ] {
                         let _ = api.execute_tool(stop).await;
                     }
@@ -2069,12 +2201,79 @@ async fn run_agent_llm_injector(
                 })
                 .unwrap_or("");
 
-            match agent.parse_llm_tool_call(script) {
-                Ok(tool) => agent.executor.offer_llm_tool(tool),
+            let parsed = agent.parse_llm_tool_call(script);
+            let tool = match parsed {
+                Ok(tool) => Some(tool),
                 Err(err) => {
                     agent.memory.last_error = Some(format!("{err:#}"));
                     println!("proxy.bot.agent llm_tool_parse_failed error={err:#}");
+
+                    // One-shot repair reprompt (no injection on failure).
+                    let repair_prompt = format!(
+                        "{prompt_str}\n\n[REPAIR]\n{repair_instruction}\n[INVALID_OUTPUT]\n{script}\n"
+                    );
+
+                    let llm_call_ok = limiter
+                        .lock()
+                        .await
+                        .allow_llm_call(std::time::Instant::now());
+                    if !llm_call_ok {
+                        None
+                    } else {
+                        match client
+                            .post(&endpoint)
+                            .json(&serde_json::json!({
+                                "model": model,
+                                "prompt": repair_prompt,
+                                "stream": false
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(repair_resp) => {
+                                let repair_payload: serde_json::Value =
+                                    match repair_resp.error_for_status() {
+                                        Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
+                                        Err(err) => {
+                                            agent.memory.last_error =
+                                                Some(format!("repair_status_failed: {err:#}"));
+                                            serde_json::Value::Null
+                                        }
+                                    };
+                                let repair_script = repair_payload
+                                    .get("response")
+                                    .and_then(serde_json::Value::as_str)
+                                    .or_else(|| {
+                                        repair_payload
+                                            .get("message")
+                                            .and_then(|m| m.get("content"))
+                                            .and_then(serde_json::Value::as_str)
+                                    })
+                                    .unwrap_or("");
+                                match agent.parse_llm_tool_call(repair_script) {
+                                    Ok(tool) => Some(tool),
+                                    Err(err) => {
+                                        agent.memory.last_error =
+                                            Some(format!("repair_parse_failed: {err:#}"));
+                                        println!(
+                                            "proxy.bot.agent llm_tool_repair_failed error={err:#}"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                agent.memory.last_error =
+                                    Some(format!("repair_poll_failed: {err:#}"));
+                                None
+                            }
+                        }
+                    }
                 }
+            };
+
+            if let Some(tool) = tool {
+                agent.executor.offer_llm_tool(tool);
             }
         }
     }

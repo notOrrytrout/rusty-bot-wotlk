@@ -172,17 +172,17 @@ Acceptance checks
 - [ ] Major release: default verbose proxy/agent debug logging OFF (make it opt-in via env/config); keep current defaults during active development.
 
 ### 5) LLM Adapter Hardening (Parsing + Guardrails)
-- [ ] Strict JSON parse of LLM output into `ToolCall`.
+- [x] Strict JSON parse of LLM output into `<tool_call>` -> `ToolInvocation` (validated).
 - [ ] On JSON parse failure:
-  - [ ] Do not inject anything.
-  - [ ] Record an error in memory.
-  - [ ] Reprompt with a tighter “return only JSON” instruction and the invalid output included as context.
+  - [x] Do not inject anything.
+  - [x] Record an error in memory.
+  - [x] Reprompt with a tighter instruction and the invalid output included as context (one-shot repair).
 - [ ] Add rate limiting:
-  - [ ] Max LLM calls per minute
-  - [ ] Max injections per second
+  - [x] Max LLM calls per minute (`RUSTY_BOT_LLM_MAX_CALLS_PER_MIN`)
+  - [x] Max injections per second (`RUSTY_BOT_INJECT_MAX_PER_SEC`)
 - [ ] Add “dangerous action” gate framework (not used in MVP tools, but required for future):
-  - [ ] “requires_confirm” tool metadata
-  - [ ] “confirm=true” must be present in args to execute
+  - [x] “requires_confirm” tool metadata (scaffold)
+  - [x] “confirm=true” must be present in args to execute (scaffold)
 
 ### 6) Observation Improvements (Make Planning Actually Work)
 - [ ] Cap lists and sort nearby entities by distance (top N).

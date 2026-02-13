@@ -1,26 +1,31 @@
 use std::time::Duration;
 
-use super::ToolCall;
 use super::memory::ToolResult;
 use super::wire::{RequestMoveArgs, RequestStopArgs, RequestTurnArgs, StopKind};
+use super::{ToolCall, ToolInvocation};
 
 pub trait ToolMeta {
     fn is_continuous(&self) -> bool;
     fn default_timeout(&self) -> Duration;
-    fn auto_stop_after(&self) -> Option<ToolCall>;
+    fn auto_stop_after(&self) -> Option<ToolInvocation>;
+    fn requires_confirm(&self) -> bool;
 }
 
-impl ToolMeta for ToolCall {
+impl ToolMeta for ToolInvocation {
     fn is_continuous(&self) -> bool {
-        is_continuous(self)
+        is_continuous(&self.call)
     }
 
     fn default_timeout(&self) -> Duration {
-        default_timeout(self)
+        default_timeout(&self.call)
     }
 
-    fn auto_stop_after(&self) -> Option<ToolCall> {
-        auto_stop_after(self)
+    fn auto_stop_after(&self) -> Option<ToolInvocation> {
+        auto_stop_after(&self.call)
+    }
+
+    fn requires_confirm(&self) -> bool {
+        requires_confirm(&self.call)
     }
 }
 
@@ -43,16 +48,27 @@ pub fn default_timeout(tool: &ToolCall) -> Duration {
     }
 }
 
-pub fn auto_stop_after(tool: &ToolCall) -> Option<ToolCall> {
+pub fn auto_stop_after(tool: &ToolCall) -> Option<ToolInvocation> {
     match tool {
-        ToolCall::RequestMove(_) => Some(ToolCall::RequestStop(RequestStopArgs {
-            kind: StopKind::Move,
-        })),
-        ToolCall::RequestTurn(_) => Some(ToolCall::RequestStop(RequestStopArgs {
-            kind: StopKind::Turn,
-        })),
+        ToolCall::RequestMove(_) => Some(ToolInvocation {
+            call: ToolCall::RequestStop(RequestStopArgs {
+                kind: StopKind::Move,
+            }),
+            confirm: false,
+        }),
+        ToolCall::RequestTurn(_) => Some(ToolInvocation {
+            call: ToolCall::RequestStop(RequestStopArgs {
+                kind: StopKind::Turn,
+            }),
+            confirm: false,
+        }),
         _ => None,
     }
+}
+
+pub fn requires_confirm(_tool: &ToolCall) -> bool {
+    // Movement/emotes are always safe. This is scaffolding for future destructive tools (vendor, delete, mail, etc).
+    false
 }
 
 pub fn ok(reason: impl Into<String>) -> ToolResult {

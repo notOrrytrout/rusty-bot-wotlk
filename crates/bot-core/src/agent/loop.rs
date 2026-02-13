@@ -2,7 +2,7 @@ use super::executor::Executor;
 use super::memory::AgentMemory;
 use super::observation::{Observation, ObservationBuilder};
 use super::prompt::{PromptConfig, build_control_prompt};
-use super::{ToolCall, parse_tool_call};
+use super::{ToolInvocation, parse_tool_call};
 
 #[derive(Debug)]
 pub struct AgentLoop {
@@ -28,7 +28,7 @@ impl AgentLoop {
         build_control_prompt(&self.system_prompt, obs, &self.memory, &self.prompt_cfg)
     }
 
-    pub fn parse_llm_tool_call(&self, raw_llm_text: &str) -> anyhow::Result<ToolCall> {
+    pub fn parse_llm_tool_call(&self, raw_llm_text: &str) -> anyhow::Result<ToolInvocation> {
         parse_tool_call(raw_llm_text)
     }
 }
