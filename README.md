@@ -56,6 +56,14 @@ This starts a local mock LLM server and the standalone gateway proxy, and also c
 bash scripts/run_runner_with_mock.sh
 ```
 
+## Control Panel (Optional)
+
+If you want a simple interactive menu instead of manually typing `nc` JSON lines, run:
+
+```bash
+python3 scripts/control_panel.py
+```
+
 Config is loaded from `config/wow/wotlk/connection.toml` by default (or from `RUSTY_BOT_CONFIG_DIR` if set).
 
 ### In-Game Smoke Tests (Real Client + Agent)
