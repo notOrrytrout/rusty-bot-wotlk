@@ -1433,6 +1433,13 @@ async fn run_demo_llm_injector(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
 
+    let injector = MovementTemplateInjector::new(
+        upstream_tx.clone(),
+        downstream_tx.clone(),
+        injection_guard.clone(),
+        echo_to_client,
+    );
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(1200))
         .build()?;
@@ -1516,32 +1523,29 @@ async fn run_demo_llm_injector(
 
         // If we owe a stop packet, emit it before polling the LLM for the next command.
         if let Some(stop_cmd) = pending_stop_to_issue.take() {
-            if let Some(packet) = prepare_demo_packet(&stop_cmd, &injection_guard).await {
-                if let Some(packet) = apply_injection_guard(packet, &injection_guard).await {
+            match injector.inject_command(&stop_cmd).await {
+                Ok(InjectCommandOutcome::Injected { opcode, body_len }) => {
                     println!(
                         "proxy.bot.demo inject cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                        stop_cmd,
-                        packet.opcode,
-                        packet.body.len()
+                        stop_cmd, opcode, body_len
                     );
-                    if let Err(err) =
-                        send_injected_packet(packet, &upstream_tx, &downstream_tx, echo_to_client)
-                            .await
-                    {
-                        eprintln!("proxy.bot.demo stop_send_failed error={err:#}");
-                        return Ok(());
-                    }
-                    let issued_at = Instant::now();
-                    let mut state = injection_guard.lock().await;
-                    let timeout = default_action_timeout_for(&stop_cmd);
-                    state.pending_action = Some(PendingAction {
-                        cmd: stop_cmd,
-                        issued_at,
-                        baseline_client_time: state.last_client_move_time,
-                        timeout,
-                    });
+                }
+                Ok(InjectCommandOutcome::Suppressed) => continue,
+                Ok(InjectCommandOutcome::MissingTemplate) => continue,
+                Err(err) => {
+                    eprintln!("proxy.bot.demo stop_send_failed error={err:#}");
+                    return Ok(());
                 }
             }
+            let issued_at = Instant::now();
+            let mut state = injection_guard.lock().await;
+            let timeout = default_action_timeout_for(&stop_cmd);
+            state.pending_action = Some(PendingAction {
+                cmd: stop_cmd,
+                issued_at,
+                baseline_client_time: state.last_client_move_time,
+                timeout,
+            });
             continue;
         }
 
@@ -1584,23 +1588,7 @@ async fn run_demo_llm_injector(
                         state.pending_action = None;
                     }
                     for cmd in ["turn stop", "strafe stop", "move stop"] {
-                        if let Some(pkt) = prepare_demo_packet(cmd, &injection_guard).await {
-                            if let Some(pkt) = apply_injection_guard(pkt, &injection_guard).await {
-                                println!(
-                                    "proxy.bot.demo emergency_stop cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                                    cmd,
-                                    pkt.opcode,
-                                    pkt.body.len()
-                                );
-                                let _ = send_injected_packet(
-                                    pkt,
-                                    &upstream_tx,
-                                    &downstream_tx,
-                                    echo_to_client,
-                                )
-                                .await;
-                            }
-                        }
+                        let _ = injector.inject_command(cmd).await;
                     }
                 }
                 continue;
@@ -1626,25 +1614,7 @@ async fn run_demo_llm_injector(
                             state.pending_action = None;
                         }
                         for cmd in ["turn stop", "strafe stop", "move stop"] {
-                            if let Some(pkt) = prepare_demo_packet(cmd, &injection_guard).await {
-                                if let Some(pkt) =
-                                    apply_injection_guard(pkt, &injection_guard).await
-                                {
-                                    println!(
-                                        "proxy.bot.demo emergency_stop cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                                        cmd,
-                                        pkt.opcode,
-                                        pkt.body.len()
-                                    );
-                                    let _ = send_injected_packet(
-                                        pkt,
-                                        &upstream_tx,
-                                        &downstream_tx,
-                                        echo_to_client,
-                                    )
-                                    .await;
-                                }
-                            }
+                            let _ = injector.inject_command(cmd).await;
                         }
                     }
                     continue;
@@ -1666,23 +1636,7 @@ async fn run_demo_llm_injector(
                         state.pending_action = None;
                     }
                     for cmd in ["turn stop", "strafe stop", "move stop"] {
-                        if let Some(pkt) = prepare_demo_packet(cmd, &injection_guard).await {
-                            if let Some(pkt) = apply_injection_guard(pkt, &injection_guard).await {
-                                println!(
-                                    "proxy.bot.demo emergency_stop cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                                    cmd,
-                                    pkt.opcode,
-                                    pkt.body.len()
-                                );
-                                let _ = send_injected_packet(
-                                    pkt,
-                                    &upstream_tx,
-                                    &downstream_tx,
-                                    echo_to_client,
-                                )
-                                .await;
-                            }
-                        }
+                        let _ = injector.inject_command(cmd).await;
                     }
                 }
                 continue;
@@ -1719,31 +1673,26 @@ async fn run_demo_llm_injector(
                 continue;
             }
         }
-        let packet = prepare_demo_packet(&cmd, &injection_guard).await;
-        let Some(packet) = packet else {
-            if !missing_template_logged {
-                println!("proxy.bot.demo waiting_for_client_movement_template");
-                missing_template_logged = true;
+        match injector.inject_command(&cmd).await {
+            Ok(InjectCommandOutcome::Injected { opcode, body_len }) => {
+                missing_template_logged = false;
+                println!(
+                    "proxy.bot.demo inject cmd=\"{}\" opcode=0x{:04x} body_len={}",
+                    cmd, opcode, body_len
+                );
             }
-            continue;
-        };
-        let packet = match apply_injection_guard(packet, &injection_guard).await {
-            Some(packet) => packet,
-            None => continue,
-        };
-
-        missing_template_logged = false;
-        println!(
-            "proxy.bot.demo inject cmd=\"{}\" opcode=0x{:04x} body_len={}",
-            cmd,
-            packet.opcode,
-            packet.body.len()
-        );
-        if let Err(err) =
-            send_injected_packet(packet, &upstream_tx, &downstream_tx, echo_to_client).await
-        {
-            eprintln!("proxy.bot.demo send_failed error={err:#}");
-            return Ok(());
+            Ok(InjectCommandOutcome::Suppressed) => continue,
+            Ok(InjectCommandOutcome::MissingTemplate) => {
+                if !missing_template_logged {
+                    println!("proxy.bot.demo waiting_for_client_movement_template");
+                    missing_template_logged = true;
+                }
+                continue;
+            }
+            Err(err) => {
+                eprintln!("proxy.bot.demo send_failed error={err:#}");
+                return Ok(());
+            }
         }
         if cmd == "jump" {
             last_jump_at = Some(now);
@@ -1764,6 +1713,80 @@ async fn run_demo_llm_injector(
                 timeout,
             });
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InjectCommandOutcome {
+    Injected { opcode: u32, body_len: usize },
+    Suppressed,
+    MissingTemplate,
+}
+
+struct MovementTemplateInjector {
+    upstream_tx: mpsc::Sender<WorldPacket>,
+    downstream_tx: mpsc::Sender<WorldPacket>,
+    injection_guard: Arc<Mutex<InjectionGuardState>>,
+    echo_to_client: bool,
+}
+
+impl MovementTemplateInjector {
+    fn new(
+        upstream_tx: mpsc::Sender<WorldPacket>,
+        downstream_tx: mpsc::Sender<WorldPacket>,
+        injection_guard: Arc<Mutex<InjectionGuardState>>,
+        echo_to_client: bool,
+    ) -> Self {
+        Self {
+            upstream_tx,
+            downstream_tx,
+            injection_guard,
+            echo_to_client,
+        }
+    }
+
+    async fn get_template(&self) -> Option<WorldPacket> {
+        let state = self.injection_guard.lock().await;
+        state
+            .last_client_move_packet
+            .clone()
+            .or(state.last_demo_packet.clone())
+    }
+
+    async fn build_movement_packet_for_command(&self, cmd: &str) -> Option<WorldPacket> {
+        // Keep using the existing demo builder (it already handles the movement time template and emotes).
+        prepare_demo_packet(cmd, &self.injection_guard).await
+    }
+
+    async fn apply_guard(&self, packet: WorldPacket) -> Option<WorldPacket> {
+        apply_injection_guard(packet, &self.injection_guard).await
+    }
+
+    async fn send(&self, packet: WorldPacket) -> anyhow::Result<()> {
+        send_injected_packet(
+            packet,
+            &self.upstream_tx,
+            &self.downstream_tx,
+            self.echo_to_client,
+        )
+        .await
+    }
+
+    async fn inject_command(&self, cmd: &str) -> anyhow::Result<InjectCommandOutcome> {
+        if self.get_template().await.is_none() && !cmd.starts_with("emote ") {
+            return Ok(InjectCommandOutcome::MissingTemplate);
+        }
+
+        let Some(packet) = self.build_movement_packet_for_command(cmd).await else {
+            return Ok(InjectCommandOutcome::MissingTemplate);
+        };
+        let Some(packet) = self.apply_guard(packet).await else {
+            return Ok(InjectCommandOutcome::Suppressed);
+        };
+        let opcode = packet.opcode;
+        let body_len = packet.body.len();
+        self.send(packet).await?;
+        Ok(InjectCommandOutcome::Injected { opcode, body_len })
     }
 }
 
@@ -1853,30 +1876,30 @@ impl AgentGameApi for ProxyAgentApi {
                 });
             }
 
+            let injector = MovementTemplateInjector::new(
+                self.upstream_tx.clone(),
+                self.downstream_tx.clone(),
+                self.injection_guard.clone(),
+                self.echo_to_client,
+            );
             for cmd in cmds {
-                let Some(packet) = prepare_demo_packet(&cmd, &self.injection_guard).await else {
-                    return Ok(AgentToolResult {
-                        status: AgentToolStatus::Retryable,
-                        reason: "missing_movement_template".to_string(),
-                        facts: serde_json::json!({ "cmd": cmd }),
-                    });
-                };
-                let Some(packet) = apply_injection_guard(packet, &self.injection_guard).await
-                else {
-                    return Ok(AgentToolResult {
-                        status: AgentToolStatus::Retryable,
-                        reason: "injection_suppressed".to_string(),
-                        facts: serde_json::json!({ "cmd": cmd }),
-                    });
-                };
-                send_injected_packet(
-                    packet,
-                    &self.upstream_tx,
-                    &self.downstream_tx,
-                    self.echo_to_client,
-                )
-                .await
-                .with_context(|| format!("inject cmd={cmd}"))?;
+                match injector.inject_command(&cmd).await? {
+                    InjectCommandOutcome::Injected { .. } => {}
+                    InjectCommandOutcome::Suppressed => {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Retryable,
+                            reason: "injection_suppressed".to_string(),
+                            facts: serde_json::json!({ "cmd": cmd }),
+                        });
+                    }
+                    InjectCommandOutcome::MissingTemplate => {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Retryable,
+                            reason: "missing_movement_template".to_string(),
+                            facts: serde_json::json!({ "cmd": cmd }),
+                        });
+                    }
+                }
             }
 
             Ok(AgentToolResult {

@@ -154,19 +154,22 @@ Acceptance checks
 
 ### 4) Proxy Integration (Implement `GameApi`)
 - [x] Introduce a proxy-side `GameApi` implementation that wraps existing injection channels + world state.
-- [ ] Extract the movement-template injection logic from the demo into reusable methods:
-  - [ ] “get template”
-  - [ ] “build movement packet for command”
-  - [ ] “apply injection guard”
-  - [ ] “send packet” (upstream/both routing)
+- [x] Extract the movement-template injection logic from the demo into reusable methods:
+  - [x] “get template”
+  - [x] “build movement packet for command”
+  - [x] “apply injection guard”
+  - [x] “send packet” (upstream/both routing)
 - [x] Replace (or gate behind a new flag) `run_demo_llm_injector` with an agent loop tick:
   - [x] Periodic tick reads observation
   - [x] If executor idle, call LLM for next tool
   - [x] Execute tool and wait for completion (v1: observation + duration-based completion)
 
 Acceptance checks
-- [ ] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_DEMO_USE_VISION=1`.
-- [ ] LLM down/unreachable triggers emergency stop behavior and keeps loop alive.
+- [x] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_DEMO_USE_VISION=1`.
+- [x] LLM down/unreachable triggers emergency stop behavior and keeps loop alive.
+
+### Release Hygiene (Later)
+- [ ] Major release: default verbose proxy/agent debug logging OFF (make it opt-in via env/config); keep current defaults during active development.
 
 ### 5) LLM Adapter Hardening (Parsing + Guardrails)
 - [ ] Strict JSON parse of LLM output into `ToolCall`.
