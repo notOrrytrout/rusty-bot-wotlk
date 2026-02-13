@@ -10,11 +10,42 @@ Current shape:
 
 ## Getting Started
 
-Clone the repo and enter the workspace:
+Install `git`, then clone the repo and enter the workspace.
+
+### macOS / Linux (Terminal)
 
 ```bash
 git clone https://github.com/notOrrytrout/rusty-bot-wotlk
 cd rusty-bot-wotlk
+```
+
+Pull updates later:
+
+```bash
+cd rusty-bot-wotlk
+git pull
+```
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/notOrrytrout/rusty-bot-wotlk
+cd .\\rusty-bot-wotlk
+```
+
+Pull updates later:
+
+```powershell
+cd .\\rusty-bot-wotlk
+git pull
+```
+
+### Windows (Git Bash)
+
+```bash
+git clone https://github.com/notOrrytrout/rusty-bot-wotlk
+cd rusty-bot-wotlk
+git pull
 ```
 
 ## Running (Mock LLM)
@@ -42,7 +73,7 @@ This is the default. The script will start:
 - `rusty-bot-proxy` (gateway proxy)
 
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 bash scripts/run_runner_with_mock.sh
 ```
 
@@ -58,26 +89,26 @@ The mock LLM can be driven deterministically.
 
 Move forward for ~900ms on each tick:
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 MOCK_OLLAMA_RESPONSE="move forward" bash scripts/run_runner_with_mock.sh
 ```
 
 Stop movement on each tick:
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 MOCK_OLLAMA_RESPONSE="move stop" bash scripts/run_runner_with_mock.sh
 ```
 
 Send an explicit tool call (exactly one block, preserved as-is):
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 MOCK_OLLAMA_RESPONSE='<tool_call>{"name":"request_move","arguments":{"direction":"forward","duration_ms":600}}</tool_call>' \
   bash scripts/run_runner_with_mock.sh
 ```
 
 Test emotes (requires `MOCK_OLLAMA_INCLUDE_EMOTES=1` to rotate emotes automatically, or set a response directly):
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 MOCK_OLLAMA_RESPONSE="emote wave" bash scripts/run_runner_with_mock.sh
 ```
 
@@ -85,13 +116,13 @@ MOCK_OLLAMA_RESPONSE="emote wave" bash scripts/run_runner_with_mock.sh
 
 Agent loop (default):
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 RUSTY_BOT_AGENT=1 bash scripts/run_runner_with_mock.sh
 ```
 
 Legacy demo loop:
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 RUSTY_BOT_AGENT=0 bash scripts/run_runner_with_mock.sh
 ```
 
@@ -99,7 +130,7 @@ RUSTY_BOT_AGENT=0 bash scripts/run_runner_with_mock.sh
 
 This is included in the agent prompt as context (the current tool set is still movement-only):
 ```bash
-cd <repo-root>
+cd rusty-bot-wotlk
 RUSTY_BOT_GOAL="walk in a small square" bash scripts/run_runner_with_mock.sh
 ```
 
