@@ -38,9 +38,8 @@ Scope target: WoW WotLK 3.3.5a-style gameplay automation via the existing gatewa
 ### Control + Demo LLM Loop (Current “Agent” Prototype)
 - [x] Proxy exposes a control TCP port that accepts raw injection lines: `"<opcode_hex> <body_hex>"`. (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Control TCP port also accepts NDJSON control messages for agent commands (`op=status|agent_enable|set_goal|clear_goal|inject`). (`crates/gateway-proxy/src/proxy.rs`)
-- [x] Demo LLM injector loop exists (polls an Ollama-style endpoint on an interval) and injects one discrete command at a time. (`crates/gateway-proxy/src/proxy.rs`)
-- [x] Demo command sanitizer supports (at least): `move forward/backward/left/right`, `move stop`, `turn left/right`, `turn stop`, `strafe stop`, `jump`, `emote <key>` (emotes partial). (`crates/gateway-proxy/src/proxy.rs`)
-- [x] Demo injection uses a real-client movement packet template when available; includes simple time advancement and “emergency stop” behavior on LLM failure. (`crates/gateway-proxy/src/proxy.rs`)
+- [x] In-proxy agent loop polls an Ollama-style endpoint on an interval and injects one tool call at a time. (`crates/gateway-proxy/src/proxy.rs`)
+- [x] Injection uses a real-client movement packet template when available; includes “emergency stop” behavior on LLM failure. (`crates/gateway-proxy/src/proxy.rs`)
 - [x] Mock LLM server exists for local dev (`/api/generate`, `/api/chat`) with rotating canned responses. (`scripts/mock_ollama.py`, `scripts/run_runner_with_mock.sh`)
 
 ---
@@ -64,16 +63,15 @@ MVP high-level goals (first set to support end-to-end):
 - [x] Run `cargo test` at workspace root and record current state (pass/fail) in this file under “Notes”.
 - [x] Add a single command to run the proxy demo in one line (document only; no code change needed yet):
   - [x] `bash scripts/run_runner_with_mock.sh`
-- [x] Inventory runtime env vars currently used by the demo loop (documented from code):
+- [x] Inventory runtime env vars currently used (documented from code):
   - [x] `RUSTY_BOT_CONFIG_DIR`
-  - [x] `RUSTY_BOT_DEMO`
+  - [x] `RUSTY_BOT_AGENT_ENABLED`
   - [x] `RUSTY_BOT_REAL_CLIENT`
   - [x] `RUSTY_BOT_LLM_ENDPOINT`
   - [x] `RUSTY_BOT_LLM_MODEL`
-  - [x] `RUSTY_BOT_DEMO_USE_VISION`
-  - [x] `RUSTY_BOT_LLM_PROMPT`
-  - [x] `RUSTY_BOT_DEMO_ECHO_TO_CLIENT`
-  - [x] `RUSTY_BOT_DEMO_SUPPRESS_CLIENT_MOVEMENT`
+  - [x] `RUSTY_BOT_AGENT_USE_VISION`
+  - [x] `RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT`
+  - [x] `RUSTY_BOT_SUPPRESS_CLIENT_MOVEMENT`
 
 ### 1) Contracts (Schemas + Interfaces)
 - [x] Decide where the agent runs:
@@ -158,13 +156,13 @@ Acceptance checks
   - [x] “build movement packet for command”
   - [x] “apply injection guard”
   - [x] “send packet” (upstream/both routing)
-- [x] Replace (or gate behind a new flag) `run_demo_llm_injector` with an agent loop tick:
+- [x] Remove legacy demo injector and run the agent loop tick in-proxy:
   - [x] Periodic tick reads observation
   - [x] If executor idle, call LLM for next tool
   - [x] Execute tool and wait for completion (v1: observation + duration-based completion)
 
 Acceptance checks
-- [x] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_DEMO_USE_VISION=1`.
+- [x] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_AGENT_USE_VISION=1`.
 - [x] LLM down/unreachable triggers emergency stop behavior and keeps loop alive.
 
 ### Release Hygiene (Later)

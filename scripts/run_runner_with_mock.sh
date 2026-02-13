@@ -10,7 +10,7 @@ set -euo pipefail
 #   RUSTY_BOT_CONFIG_DIR (default: <repo>/config)
 #   MOCK_OLLAMA_INCLUDE_EMOTES=1 to include emotes in the rotating responses
 #   MOCK_OLLAMA_TOOL_CALLS=1 to emit `<tool_call>{...}</tool_call>` wrapped JSON responses (default: 1)
-#   RUSTY_BOT_DEMO=1 (default: 1)
+#   RUSTY_BOT_AGENT_ENABLED=1 (default: 1)
 #   RUSTY_BOT_REAL_CLIENT=1 (default: 1) - required by bot contract if bot is enabled in config
 
 HOST="${1:-127.0.0.1}"
@@ -138,7 +138,7 @@ echo "mock LLM: http://${HOST}:${PORT}"
 echo "config dir: ${CFG_DIR}"
 
 RUSTY_BOT_CONFIG_DIR="${CFG_DIR}" \
-RUSTY_BOT_DEMO="${RUSTY_BOT_DEMO:-1}" \
+RUSTY_BOT_AGENT_ENABLED="${RUSTY_BOT_AGENT_ENABLED:-1}" \
 RUSTY_BOT_REAL_CLIENT="${RUSTY_BOT_REAL_CLIENT:-1}" \
 RUSTY_BOT_LLM_ENDPOINT="${RUSTY_BOT_LLM_ENDPOINT:-http://${HOST}:${PORT}/api/generate}" \
 cargo run -p rusty-bot-proxy

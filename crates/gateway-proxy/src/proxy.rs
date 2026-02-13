@@ -154,162 +154,6 @@ struct WorldPacket {
     body: Vec<u8>,
 }
 
-#[derive(Debug)]
-struct PendingAction {
-    cmd: String,
-    issued_at: Instant,
-    baseline_client_time: Option<u32>,
-    timeout: Duration,
-}
-
-fn default_action_timeout_for(cmd: &str) -> Duration {
-    if cmd.starts_with("emote ") || cmd == "emote" {
-        Duration::from_millis(1800)
-    } else if matches!(
-        cmd,
-        "move forward" | "move backward" | "move left" | "move right" | "turn left" | "turn right"
-    ) {
-        // Continuous actions: behave like holding a key for a bit.
-        Duration::from_millis(1200)
-    } else {
-        Duration::from_millis(900)
-    }
-}
-
-#[derive(Debug)]
-struct DemoIntent {
-    cmd: String,
-    timeout: Option<Duration>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ToolCallWire {
-    name: String,
-    #[serde(default)]
-    arguments: serde_json::Value,
-}
-
-fn extract_tool_call_json(script: &str) -> Option<&str> {
-    let start_tag = "<tool_call>";
-    let end_tag = "</tool_call>";
-    let start = script.find(start_tag)? + start_tag.len();
-    let end = script[start..].find(end_tag)? + start;
-    Some(script[start..end].trim())
-}
-
-fn tool_call_to_demo_intent(call: &ToolCallWire) -> Option<DemoIntent> {
-    let name = call.name.trim().to_ascii_lowercase();
-
-    let duration_from_args = || -> Option<Duration> {
-        let ms = call.arguments.get("duration_ms").and_then(|v| v.as_u64())?;
-        let clamped = ms.clamp(150, 5_000) as u64;
-        Some(Duration::from_millis(clamped))
-    };
-
-    let direction_from_args = || -> Option<String> {
-        call.arguments
-            .get("direction")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_ascii_lowercase())
-    };
-
-    match name.as_str() {
-        "request_idle" => Some(DemoIntent {
-            cmd: "move stop".to_string(),
-            timeout: Some(Duration::from_millis(700)),
-        }),
-        "request_jump" => Some(DemoIntent {
-            cmd: "jump".to_string(),
-            timeout: None,
-        }),
-        "request_emote" => {
-            let key = call
-                .arguments
-                .get("key")
-                .and_then(|v| v.as_str())
-                .unwrap_or("wave")
-                .trim()
-                .to_ascii_lowercase();
-            if key.split_whitespace().count() != 1 {
-                return None;
-            }
-            Some(DemoIntent {
-                cmd: format!("emote {key}"),
-                timeout: None,
-            })
-        }
-        "request_stop" => {
-            let kind = call
-                .arguments
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("move")
-                .trim()
-                .to_ascii_lowercase();
-            let cmd = match kind.as_str() {
-                "move" | "all" => "move stop",
-                "turn" => "turn stop",
-                "strafe" => "strafe stop",
-                _ => return None,
-            };
-            Some(DemoIntent {
-                cmd: cmd.to_string(),
-                timeout: Some(Duration::from_millis(700)),
-            })
-        }
-        "request_move" => {
-            let dir = direction_from_args()?;
-            let cmd = match dir.as_str() {
-                "forward" => "move forward",
-                "backward" => "move backward",
-                "left" => "move left",
-                "right" => "move right",
-                _ => return None,
-            };
-            Some(DemoIntent {
-                cmd: cmd.to_string(),
-                timeout: duration_from_args().or(Some(Duration::from_millis(900))),
-            })
-        }
-        "request_turn" => {
-            let dir = direction_from_args()?;
-            let cmd = match dir.as_str() {
-                "left" => "turn left",
-                "right" => "turn right",
-                _ => return None,
-            };
-            Some(DemoIntent {
-                cmd: cmd.to_string(),
-                timeout: duration_from_args().or(Some(Duration::from_millis(700))),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn parse_demo_intent(script: &str) -> Option<DemoIntent> {
-    if let Some(json_str) = extract_tool_call_json(script) {
-        let call: ToolCallWire = match serde_json::from_str(json_str) {
-            Ok(call) => call,
-            Err(err) => {
-                println!("proxy.bot.demo tool_call_parse_failed error={err}");
-                return None;
-            }
-        };
-        if let Some(intent) = tool_call_to_demo_intent(&call) {
-            return Some(intent);
-        }
-        println!(
-            "proxy.bot.demo tool_call_unsupported name=\"{}\" args={}",
-            call.name, call.arguments
-        );
-        return None;
-    }
-
-    // Backward-compatible: accept a single-line natural language command.
-    sanitize_demo_command(script).map(|cmd| DemoIntent { cmd, timeout: None })
-}
-
 async fn send_injected_packet(
     packet: WorldPacket,
     upstream_tx: &mpsc::Sender<WorldPacket>,
@@ -365,7 +209,6 @@ struct InjectionGuardState {
     last_demo_packet: Option<WorldPacket>,
     last_demo_inject_at: Option<Instant>,
     last_client_correction_at: Option<Instant>,
-    pending_action: Option<PendingAction>,
     suppressed_count: u32,
     last_self_guid: Option<u64>,
 }
@@ -716,14 +559,11 @@ async fn handle_world_session(
         "proxy->client",
     ));
 
-    let agent_enabled = std::env::var("RUSTY_BOT_AGENT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
-    let (agent_tx, agent_rx) = if agent_enabled {
+    // The in-proxy agent loop is the only runner. It can be enabled/disabled at runtime via the
+    // control port (`op=agent_enable`), so we always start the control channel.
+    let (agent_tx, agent_rx) = {
         let (tx, rx) = mpsc::channel::<AgentControlCommand>(32);
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
+        (Some(tx), rx)
     };
 
     let control_task = tokio::spawn(serve_control(
@@ -734,22 +574,13 @@ async fn handle_world_session(
         world_state.clone(),
         agent_tx.clone(),
     ));
-    let demo_task = if agent_enabled {
-        tokio::spawn(run_agent_llm_injector(
-            upstream_tx.clone(),
-            downstream_inject_tx.clone(),
-            injection_guard.clone(),
-            world_state.clone(),
-            agent_rx.expect("agent_rx"),
-        ))
-    } else {
-        tokio::spawn(run_demo_llm_injector(
-            upstream_tx.clone(),
-            downstream_inject_tx.clone(),
-            injection_guard.clone(),
-            world_state.clone(),
-        ))
-    };
+    let agent_task = tokio::spawn(run_agent_llm_injector(
+        upstream_tx.clone(),
+        downstream_inject_tx.clone(),
+        injection_guard.clone(),
+        world_state.clone(),
+        agent_rx,
+    ));
 
     tokio::select! {
         result = client_reader => {
@@ -807,7 +638,7 @@ async fn handle_world_session(
     }
 
     control_task.abort();
-    demo_task.abort();
+    agent_task.abort();
     Ok(())
 }
 
@@ -856,17 +687,14 @@ async fn read_client_world_packets(
     auth_rewrite: Arc<Mutex<AuthRewriteState>>,
     lane: &'static str,
 ) -> anyhow::Result<()> {
-    let demo_enabled = std::env::var("RUSTY_BOT_DEMO")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let demo_suppress_client_movement = std::env::var("RUSTY_BOT_DEMO_SUPPRESS_CLIENT_MOVEMENT")
+    let suppress_client_movement = std::env::var("RUSTY_BOT_SUPPRESS_CLIENT_MOVEMENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         // Default to allowing the user's real client to keep sending movement so:
         // - server-side corrections (walls, slopes) stay in effect
-        // - the user can steer/turn while the demo bot runs
+        // - the user can steer/turn while the bot runs
         .unwrap_or(false);
-    if demo_suppress_client_movement {
-        println!("proxy.bot.demo suppress_client_movement=true");
+    if suppress_client_movement {
+        println!("proxy.bot suppress_client_movement=true");
     }
 
     // First world packet from client is CMSG_AUTH_SESSION and must be read plaintext.
@@ -891,10 +719,10 @@ async fn read_client_world_packets(
         maybe_rewrite_client_auth_session(&mut packet, lane, &auth_rewrite).await;
         record_client_movement_observation(&packet, &injection_guard, &world_state).await;
 
-        if demo_enabled && demo_suppress_client_movement {
+        if suppress_client_movement {
             if let Ok(op_u16) = u16::try_from(packet.opcode) {
                 if is_world_move_opcode(op_u16) {
-                    // Let the demo injector be the sole writer of movement to the server.
+                    // Let the bot injector be the sole writer of movement to the server.
                     // We still record movement observations above so the injector can reuse templates.
                     continue;
                 }
@@ -1236,7 +1064,7 @@ enum ControlRequest {
         opcode: String,
         body_hex: String,
     },
-    /// Enable/disable the in-proxy agent loop (independent of the demo injector).
+    /// Enable/disable the in-proxy agent loop.
     AgentEnable {
         enabled: bool,
     },
@@ -1766,320 +1594,7 @@ fn read_cstring_cursor(cur: &mut std::io::Cursor<&[u8]>) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
-async fn run_demo_llm_injector(
-    upstream_tx: mpsc::Sender<WorldPacket>,
-    downstream_tx: mpsc::Sender<WorldPacket>,
-    injection_guard: Arc<Mutex<InjectionGuardState>>,
-    world_state: Arc<Mutex<WorldState>>,
-) -> anyhow::Result<()> {
-    let enabled = std::env::var("RUSTY_BOT_DEMO")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if !enabled {
-        println!("proxy.bot.demo disabled");
-        return Ok(());
-    }
-
-    let endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:11435/api/generate".to_string());
-    let model = std::env::var("RUSTY_BOT_LLM_MODEL").unwrap_or_else(|_| "mock".to_string());
-    let use_vision = std::env::var("RUSTY_BOT_DEMO_USE_VISION")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
-    let instruction = std::env::var("RUSTY_BOT_LLM_PROMPT").unwrap_or_else(|_| {
-        "Return exactly one <tool_call> JSON block and nothing else.\n\nAllowed tool calls:\n- request_move {\"direction\":\"forward|backward|left|right\",\"duration_ms\":150..5000}\n- request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}\n- request_stop {\"kind\":\"move|turn|strafe|all\"}\n- request_jump {}\n- request_emote {\"key\":\"wave|hello|bye|cheer|dance|laugh|clap|salute\"}\n\nFormat:\n<tool_call>\n{\"name\":\"request_move\",\"arguments\":{\"direction\":\"forward\",\"duration_ms\":900}}\n</tool_call>"
-            .to_string()
-    });
-    println!("proxy.bot.demo enabled endpoint={endpoint} model={model}");
-    let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    let injector = MovementTemplateInjector::new(
-        upstream_tx.clone(),
-        downstream_tx.clone(),
-        injection_guard.clone(),
-        echo_to_client,
-        None,
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(1200))
-        .build()?;
-    let mut tick = tokio::time::interval(Duration::from_millis(450));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut missing_template_logged = false;
-    let mut last_emitted_cmd: Option<String> = None;
-    let mut last_emitted_at: Option<Instant> = None;
-    let mut last_jump_at: Option<Instant> = None;
-    let mut pending_stop_to_issue: Option<String> = None;
-    let mut last_emergency_stop_at: Option<Instant> = None;
-
-    loop {
-        tick.tick().await;
-        let now = Instant::now();
-        {
-            let mut state = injection_guard.lock().await;
-            if let Some(pending) = state.pending_action.as_ref() {
-                let mut completed_reason: Option<&'static str> = None;
-                let is_continuous_move = matches!(
-                    pending.cmd.as_str(),
-                    "move forward"
-                        | "move backward"
-                        | "move left"
-                        | "move right"
-                        | "turn left"
-                        | "turn right"
-                );
-                if !is_continuous_move {
-                    if let (Some(current), Some(baseline)) =
-                        (state.last_client_move_time, pending.baseline_client_time)
-                    {
-                        if current != baseline {
-                            completed_reason = Some("client-feedback");
-                        }
-                    }
-                } else if state
-                    .last_client_correction_at
-                    .map(|t| t > pending.issued_at)
-                    .unwrap_or(false)
-                {
-                    completed_reason = Some("client-correction");
-                }
-                if completed_reason.is_none()
-                    && now.saturating_duration_since(pending.issued_at) >= pending.timeout
-                {
-                    completed_reason = Some("timeout");
-                }
-
-                if let Some(reason) = completed_reason {
-                    if let Some(done) = state.pending_action.take() {
-                        println!(
-                            "proxy.bot.demo action_complete cmd=\"{}\" reason={}",
-                            done.cmd, reason
-                        );
-                        // Avoid "stuck" continuous inputs (e.g. turning) by issuing a stop after
-                        // any continuous command completes. This keeps actions discrete and
-                        // prevents a new action from overlapping.
-                        let needs_stop = matches!(
-                            done.cmd.as_str(),
-                            "move forward"
-                                | "move backward"
-                                | "move left"
-                                | "move right"
-                                | "turn left"
-                                | "turn right"
-                        );
-                        if needs_stop {
-                            pending_stop_to_issue = Some(if done.cmd.starts_with("turn ") {
-                                "turn stop".to_string()
-                            } else {
-                                "move stop".to_string()
-                            });
-                        }
-                    }
-                } else {
-                    continue;
-                }
-            }
-        }
-
-        // If we owe a stop packet, emit it before polling the LLM for the next command.
-        if let Some(stop_cmd) = pending_stop_to_issue.take() {
-            match injector.inject_command(&stop_cmd).await {
-                Ok(InjectCommandOutcome::Injected { opcode, body_len }) => {
-                    println!(
-                        "proxy.bot.demo inject cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                        stop_cmd, opcode, body_len
-                    );
-                }
-                Ok(InjectCommandOutcome::Suppressed) => continue,
-                Ok(InjectCommandOutcome::MissingTemplate) => continue,
-                Ok(InjectCommandOutcome::RateLimited) => continue,
-                Err(err) => {
-                    eprintln!("proxy.bot.demo stop_send_failed error={err:#}");
-                    return Ok(());
-                }
-            }
-            let issued_at = Instant::now();
-            let mut state = injection_guard.lock().await;
-            let timeout = default_action_timeout_for(&stop_cmd);
-            state.pending_action = Some(PendingAction {
-                cmd: stop_cmd,
-                issued_at,
-                baseline_client_time: state.last_client_move_time,
-                timeout,
-            });
-            continue;
-        }
-
-        let prompt_str = if use_vision {
-            let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
-            let mut ws = world_state.lock().await;
-            ws.increment_tick();
-            let vision = generate_vision_prompt(&ws, guid);
-            format!("{vision}\n\n[INSTRUCTIONS]\n{instruction}")
-        } else {
-            instruction.clone()
-        };
-
-        let response = match client
-            .post(&endpoint)
-            .json(&serde_json::json!({
-                "model": model,
-                "prompt": prompt_str,
-                "stream": false
-            }))
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                eprintln!("proxy.bot.demo poll_failed error={err:#}");
-                // If the LLM is down/unreachable, immediately clear any continuous inputs so the
-                // character doesn't get stuck running/turning.
-                let now = Instant::now();
-                let throttle_ok = last_emergency_stop_at
-                    .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(700))
-                    .unwrap_or(true);
-                if throttle_ok {
-                    last_emergency_stop_at = Some(now);
-                    pending_stop_to_issue = None;
-                    last_emitted_cmd = None;
-                    last_emitted_at = None;
-                    {
-                        let mut state = injection_guard.lock().await;
-                        state.pending_action = None;
-                    }
-                    for cmd in ["turn stop", "strafe stop", "move stop"] {
-                        let _ = injector.inject_command(cmd).await;
-                    }
-                }
-                continue;
-            }
-        };
-
-        let payload: serde_json::Value = match response.error_for_status() {
-            Ok(response) => match response.json().await {
-                Ok(payload) => payload,
-                Err(err) => {
-                    eprintln!("proxy.bot.demo parse_failed error={err:#}");
-                    let now = Instant::now();
-                    let throttle_ok = last_emergency_stop_at
-                        .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(700))
-                        .unwrap_or(true);
-                    if throttle_ok {
-                        last_emergency_stop_at = Some(now);
-                        pending_stop_to_issue = None;
-                        last_emitted_cmd = None;
-                        last_emitted_at = None;
-                        {
-                            let mut state = injection_guard.lock().await;
-                            state.pending_action = None;
-                        }
-                        for cmd in ["turn stop", "strafe stop", "move stop"] {
-                            let _ = injector.inject_command(cmd).await;
-                        }
-                    }
-                    continue;
-                }
-            },
-            Err(err) => {
-                eprintln!("proxy.bot.demo status_failed error={err:#}");
-                let now = Instant::now();
-                let throttle_ok = last_emergency_stop_at
-                    .map(|t| now.saturating_duration_since(t) >= Duration::from_millis(700))
-                    .unwrap_or(true);
-                if throttle_ok {
-                    last_emergency_stop_at = Some(now);
-                    pending_stop_to_issue = None;
-                    last_emitted_cmd = None;
-                    last_emitted_at = None;
-                    {
-                        let mut state = injection_guard.lock().await;
-                        state.pending_action = None;
-                    }
-                    for cmd in ["turn stop", "strafe stop", "move stop"] {
-                        let _ = injector.inject_command(cmd).await;
-                    }
-                }
-                continue;
-            }
-        };
-
-        let script = payload
-            .get("response")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                payload
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .unwrap_or("");
-        let Some(intent) = parse_demo_intent(script) else {
-            continue;
-        };
-        let cmd = intent.cmd;
-        let now = Instant::now();
-        if cmd == "jump" {
-            if last_jump_at
-                .map(|t| now.saturating_duration_since(t) < Duration::from_millis(900))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-        } else if last_emitted_cmd.as_deref() == Some(cmd.as_str()) {
-            let refresh_due = last_emitted_at
-                .map(|t| now.saturating_duration_since(t) >= Duration::from_secs(2))
-                .unwrap_or(true);
-            if !refresh_due {
-                continue;
-            }
-        }
-        match injector.inject_command(&cmd).await {
-            Ok(InjectCommandOutcome::Injected { opcode, body_len }) => {
-                missing_template_logged = false;
-                println!(
-                    "proxy.bot.demo inject cmd=\"{}\" opcode=0x{:04x} body_len={}",
-                    cmd, opcode, body_len
-                );
-            }
-            Ok(InjectCommandOutcome::Suppressed) => continue,
-            Ok(InjectCommandOutcome::MissingTemplate) => {
-                if !missing_template_logged {
-                    println!("proxy.bot.demo waiting_for_client_movement_template");
-                    missing_template_logged = true;
-                }
-                continue;
-            }
-            Ok(InjectCommandOutcome::RateLimited) => continue,
-            Err(err) => {
-                eprintln!("proxy.bot.demo send_failed error={err:#}");
-                return Ok(());
-            }
-        }
-        if cmd == "jump" {
-            last_jump_at = Some(now);
-        }
-        last_emitted_cmd = Some(cmd);
-        last_emitted_at = Some(now);
-        {
-            let mut state = injection_guard.lock().await;
-            let timeout = intent.timeout.unwrap_or_else(|| {
-                default_action_timeout_for(&last_emitted_cmd.clone().unwrap_or_default())
-            });
-            state.pending_action = Some(PendingAction {
-                cmd: last_emitted_cmd
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                issued_at: now,
-                baseline_client_time: state.last_client_move_time,
-                timeout,
-            });
-        }
-    }
-}
+// Legacy demo injector removed: the in-proxy agent loop is the only runner.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectCommandOutcome {
@@ -2460,14 +1975,14 @@ async fn run_agent_llm_injector(
     world_state: Arc<Mutex<WorldState>>,
     mut control_rx: mpsc::Receiver<AgentControlCommand>,
 ) -> anyhow::Result<()> {
-    let start_enabled = std::env::var("RUSTY_BOT_DEMO")
+    let start_enabled = std::env::var("RUSTY_BOT_AGENT_ENABLED")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
     let endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:11435/api/generate".to_string());
     let model = std::env::var("RUSTY_BOT_LLM_MODEL").unwrap_or_else(|_| "mock".to_string());
-    let use_vision = std::env::var("RUSTY_BOT_DEMO_USE_VISION")
+    let use_vision = std::env::var("RUSTY_BOT_AGENT_USE_VISION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
     let system_prompt = std::env::var("RUSTY_BOT_LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
@@ -2475,7 +1990,7 @@ async fn run_agent_llm_injector(
             .to_string()
     });
     let goal = std::env::var("RUSTY_BOT_GOAL").ok();
-    let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
+    let echo_to_client = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     let max_llm_calls_per_min: usize = std::env::var("RUSTY_BOT_LLM_MAX_CALLS_PER_MIN")
@@ -2680,52 +2195,6 @@ async fn run_agent_llm_injector(
                 }
             }
         }
-    }
-}
-
-fn sanitize_demo_command(script: &str) -> Option<String> {
-    let mut non_empty = script.lines().map(str::trim).filter(|s| !s.is_empty());
-    let raw = non_empty.next()?;
-    if non_empty.next().is_some() {
-        println!("proxy.bot.demo sanitize extra_lines_discarded=true");
-    }
-    let normalized = raw
-        .to_ascii_lowercase()
-        .replace('_', " ")
-        .replace('-', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if let Some(arg) = normalized.strip_prefix("emote ") {
-        let arg = arg.trim();
-        if arg.is_empty() {
-            return Some("emote wave".to_string());
-        }
-        // Only allow a single-word emote key (keeps the demo contract strict).
-        if arg.split_whitespace().count() == 1 {
-            return Some(format!("emote {}", arg));
-        }
-        return None;
-    }
-
-    match normalized.as_str() {
-        "move forward" | "forward" | "walk forward" | "go forward" | "run forward" | "w" => {
-            Some("move forward".to_string())
-        }
-        "move backward" | "backward" | "go backward" | "reverse" | "s" => {
-            Some("move backward".to_string())
-        }
-        "move left" | "left" | "strafe left" | "q" => Some("move left".to_string()),
-        "move right" | "right" | "strafe right" | "e" => Some("move right".to_string()),
-        "move stop" | "stop" | "idle" | "wait" | "hold" | "halt" | "x" => {
-            Some("move stop".to_string())
-        }
-        "turn left" | "rotate left" | "a" => Some("turn left".to_string()),
-        "turn right" | "rotate right" | "d" => Some("turn right".to_string()),
-        "turn stop" | "stop turn" | "turn off" => Some("turn stop".to_string()),
-        "jump" | "space" => Some("jump".to_string()),
-        _ => None,
     }
 }
 

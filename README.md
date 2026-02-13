@@ -64,7 +64,7 @@ The proxy listens for a real WoW client on the configured addresses:
 - Login: `config/wow/wotlk/connection.toml` -> `[gateway.proxy].login_listen`
 - World: `config/wow/wotlk/connection.toml` -> `[gateway.proxy].world_listen`
 
-The bot logic runs inside the proxy process. By default it uses the new **agent loop** (tool-call based). You can force the legacy demo loop by setting `RUSTY_BOT_AGENT=0`.
+The bot logic runs inside the proxy process (in-proxy agent loop). It starts disabled by default unless `RUSTY_BOT_AGENT_ENABLED=1` is set, and can be enabled/disabled at runtime via the control port (`op=agent_enable`).
 
 #### 1) Start The Proxy + Mock LLM (Tool Calls)
 
@@ -112,19 +112,23 @@ cd rusty-bot-wotlk
 MOCK_OLLAMA_RESPONSE="emote wave" bash scripts/run_runner_with_mock.sh
 ```
 
-#### 4) Toggle Agent vs Legacy Demo Loop
+#### 4) Enable / Disable Agent Loop
 
-Agent loop (default):
+Enable agent loop at startup:
 ```bash
 cd rusty-bot-wotlk
-RUSTY_BOT_AGENT=1 bash scripts/run_runner_with_mock.sh
+RUSTY_BOT_AGENT_ENABLED=1 bash scripts/run_runner_with_mock.sh
 ```
 
-Legacy demo loop:
+Start disabled (then enable later via control port):
 ```bash
 cd rusty-bot-wotlk
-RUSTY_BOT_AGENT=0 bash scripts/run_runner_with_mock.sh
+RUSTY_BOT_AGENT_ENABLED=0 bash scripts/run_runner_with_mock.sh
 ```
+
+Optional:
+- `RUSTY_BOT_AGENT_USE_VISION=1` to append the legacy vision section to the prompt (default: 1)
+- `RUSTY_BOT_SUPPRESS_CLIENT_MOVEMENT=1` to suppress real-client movement packets to the server (default: 0)
 
 #### 5) (Optional) Set A Goal String
 
