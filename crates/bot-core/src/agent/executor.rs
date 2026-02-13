@@ -67,12 +67,46 @@ impl Executor {
 
     pub fn offer_llm_tool(&mut self, tool: ToolInvocation) {
         // V1 behavior: a single "next action" from the LLM. Clear any queued follow-ups,
-        // but preserve the currently-running action.
+        // but preserve the currently-running action unless it's continuous movement (which we
+        // preempt with a stop to prevent overlap).
         self.queue.clear();
         self.pending_attempt = None;
+
+        // Mutual exclusion for continuous movement: if we are currently moving/turning and the LLM
+        // requests a new action, issue a stop first and return to Idle so the stop can be executed
+        // immediately on the next loop tick.
+        let mut stop_first: Option<ToolInvocation> = None;
+        if let ExecutorState::Waiting {
+            tool: current,
+            stop_after,
+            ..
+        } = &self.state
+        {
+            if is_continuous(&current.call) {
+                stop_first = stop_after
+                    .clone()
+                    .or_else(|| auto_stop_after(&current.call));
+                // If we're continuous but somehow lack a stop tool, fall back to idle.
+                if stop_first.is_none() {
+                    stop_first = Some(ToolInvocation {
+                        call: ToolCall::RequestIdle,
+                        confirm: false,
+                    });
+                }
+                self.state = ExecutorState::Idle;
+            }
+        }
+
         if matches!(self.state, ExecutorState::Backoff { .. }) {
             // If the LLM chooses something else, abandon any internal retry backoff.
             self.state = ExecutorState::Idle;
+        }
+
+        if let Some(stop) = stop_first {
+            // Avoid enqueueing duplicates (common case: LLM already chose the matching stop tool).
+            if stop.call != tool.call {
+                self.queue.push_back(stop);
+            }
         }
         self.queue.push_back(tool);
     }
@@ -436,5 +470,43 @@ mod tests {
         assert!(matches!(ex.state, ExecutorState::Idle));
         let next = ex.next_to_execute().expect("retry tool");
         assert_eq!(next, tool);
+    }
+
+    #[test]
+    fn continuous_move_is_preempted_by_new_llm_action_with_stop_first() {
+        let mut ex = Executor::default();
+
+        let now = Instant::now();
+        ex.start(
+            ToolInvocation {
+                call: ToolCall::RequestMove(RequestMoveArgs {
+                    direction: MoveDirection::Forward,
+                    duration_ms: 500,
+                }),
+                confirm: false,
+            },
+            now,
+        );
+
+        ex.offer_llm_tool(ToolInvocation {
+            call: ToolCall::RequestMove(RequestMoveArgs {
+                direction: MoveDirection::Left,
+                duration_ms: 500,
+            }),
+            confirm: false,
+        });
+
+        assert!(ex.is_idle());
+
+        let first = ex.next_to_execute().expect("first");
+        assert!(matches!(
+            first.call,
+            ToolCall::RequestStop(RequestStopArgs {
+                kind: StopKind::Move
+            })
+        ));
+
+        let second = ex.next_to_execute().expect("second");
+        assert!(matches!(second.call, ToolCall::RequestMove(_)));
     }
 }
