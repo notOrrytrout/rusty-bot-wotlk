@@ -32,8 +32,14 @@ const UPDATETYPE_OUT_OF_RANGE_OBJECTS: u8 = 4;
 
 // WoW 3.3.5a update flags (AzerothCore `OBJECT_UPDATE_FLAGS`).
 const UPDATEFLAG_LIVING: u16 = 0x0020;
+const UPDATEFLAG_TRANSPORT: u16 = 0x0002;
+const UPDATEFLAG_HAS_TARGET: u16 = 0x0004;
+const UPDATEFLAG_UNKNOWN: u16 = 0x0008;
+const UPDATEFLAG_LOWGUID: u16 = 0x0010;
+const UPDATEFLAG_VEHICLE: u16 = 0x0080;
 const UPDATEFLAG_POSITION: u16 = 0x0100;
 const UPDATEFLAG_STATIONARY_POSITION: u16 = 0x0040;
+const UPDATEFLAG_ROTATION: u16 = 0x0200;
 
 // WoW 3.3.5a movement flags (subset; see gateway-proxy `wotlk::movement`).
 const MOVEMENTFLAG_ONTRANSPORT: u32 = 0x0000_0200;
@@ -41,6 +47,7 @@ const MOVEMENTFLAG_SWIMMING: u32 = 0x0020_0000;
 const MOVEMENTFLAG_FLYING: u32 = 0x0200_0000;
 const MOVEMENTFLAG_JUMPING: u32 = 0x0000_1000;
 const MOVEMENTFLAG_SPLINE_ELEVATION: u32 = 0x0400_0000;
+const MOVEMENTFLAG_SPLINE_ENABLED: u32 = 0x0800_0000;
 
 // Extra flags (subset; see gateway-proxy `wotlk::movement`).
 const MOVEMENTFLAG2_ALWAYS_ALLOW_PITCHING: u16 = 0x0020;
@@ -322,6 +329,12 @@ fn parse_movement_update(cur: &mut Cursor<&[u8]>) -> Result<Option<ParsedMovemen
         let speed_turn = cur.read_f32::<LittleEndian>()?;
         let _speed_pitch = cur.read_f32::<LittleEndian>()?;
 
+        if (movement_flags & MOVEMENTFLAG_SPLINE_ENABLED) != 0 {
+            skip_movespline_create(cur)?;
+        }
+
+        consume_movement_extras(cur, update_flags)?;
+
         Ok(Some(ParsedMovement {
             pos: crate::player::player_state::Position {
                 x,
@@ -354,6 +367,8 @@ fn parse_movement_update(cur: &mut Cursor<&[u8]>) -> Result<Option<ParsedMovemen
         let o = cur.read_f32::<LittleEndian>()?;
         let _ = cur.read_f32::<LittleEndian>()?;
 
+        consume_movement_extras(cur, update_flags)?;
+
         Ok(Some(ParsedMovement {
             pos: crate::player::player_state::Position {
                 x,
@@ -374,6 +389,8 @@ fn parse_movement_update(cur: &mut Cursor<&[u8]>) -> Result<Option<ParsedMovemen
         let z = cur.read_f32::<LittleEndian>()?;
         let o = cur.read_f32::<LittleEndian>()?;
 
+        consume_movement_extras(cur, update_flags)?;
+
         Ok(Some(ParsedMovement {
             pos: crate::player::player_state::Position {
                 x,
@@ -389,8 +406,83 @@ fn parse_movement_update(cur: &mut Cursor<&[u8]>) -> Result<Option<ParsedMovemen
             speed_turn: 0.0,
         }))
     } else {
+        consume_movement_extras(cur, update_flags)?;
         Ok(None)
     }
+}
+
+fn consume_movement_extras(cur: &mut Cursor<&[u8]>, update_flags: u16) -> Result<()> {
+    // Extra data is appended in this exact order (AzerothCore `Object::BuildMovementUpdate`).
+    if (update_flags & UPDATEFLAG_UNKNOWN) != 0 {
+        let _ = cur.read_u32::<LittleEndian>()?;
+    }
+    if (update_flags & UPDATEFLAG_LOWGUID) != 0 {
+        let _ = cur.read_u32::<LittleEndian>()?;
+    }
+    if (update_flags & UPDATEFLAG_HAS_TARGET) != 0 {
+        let _ = read_packed_guid(cur)?;
+    }
+    if (update_flags & UPDATEFLAG_TRANSPORT) != 0 {
+        let _ = cur.read_u32::<LittleEndian>()?;
+    }
+    if (update_flags & UPDATEFLAG_VEHICLE) != 0 {
+        let _ = cur.read_u32::<LittleEndian>()?;
+        let _ = cur.read_f32::<LittleEndian>()?;
+    }
+    if (update_flags & UPDATEFLAG_ROTATION) != 0 {
+        let _ = cur.read_i64::<LittleEndian>()?;
+    }
+    Ok(())
+}
+
+fn skip_movespline_create(cur: &mut Cursor<&[u8]>) -> Result<()> {
+    // Matches AzerothCore `Movement::PacketBuilder::WriteCreate`.
+    // We don't interpret it; we only consume bytes to keep the cursor aligned.
+    let flags_raw = cur.read_u32::<LittleEndian>()?;
+
+    // Facing info is mutually exclusive; see `MoveSplineFlag::Mask_Final_Facing`.
+    // Final_Point: 3 floats; Final_Target: u64 raw guid; Final_Angle: f32.
+    const FINAL_POINT: u32 = 0x0000_8000;
+    const FINAL_TARGET: u32 = 0x0001_0000;
+    const FINAL_ANGLE: u32 = 0x0002_0000;
+
+    if (flags_raw & FINAL_ANGLE) != 0 {
+        let _ = cur.read_f32::<LittleEndian>()?;
+    } else if (flags_raw & FINAL_TARGET) != 0 {
+        let _ = cur.read_u64::<LittleEndian>()?;
+    } else if (flags_raw & FINAL_POINT) != 0 {
+        let _ = cur.read_f32::<LittleEndian>()?;
+        let _ = cur.read_f32::<LittleEndian>()?;
+        let _ = cur.read_f32::<LittleEndian>()?;
+    }
+
+    // timePassed, duration, id
+    let _ = cur.read_u32::<LittleEndian>()?;
+    let _ = cur.read_u32::<LittleEndian>()?;
+    let _ = cur.read_u32::<LittleEndian>()?;
+
+    // duration_mod, duration_mod_next, vertical_acceleration
+    let _ = cur.read_f32::<LittleEndian>()?;
+    let _ = cur.read_f32::<LittleEndian>()?;
+    let _ = cur.read_f32::<LittleEndian>()?;
+
+    // effect_start_time
+    let _ = cur.read_u32::<LittleEndian>()?;
+
+    let nodes = cur.read_u32::<LittleEndian>()? as usize;
+    for _ in 0..nodes {
+        let _ = cur.read_f32::<LittleEndian>()?;
+        let _ = cur.read_f32::<LittleEndian>()?;
+        let _ = cur.read_f32::<LittleEndian>()?;
+    }
+
+    let _ = cur.read_u8()?;
+
+    let _ = cur.read_f32::<LittleEndian>()?;
+    let _ = cur.read_f32::<LittleEndian>()?;
+    let _ = cur.read_f32::<LittleEndian>()?;
+
+    Ok(())
 }
 
 fn apply_player_fields(player: &mut PlayerCurrentState, field_mask: &[u32], values: &[u32]) {
@@ -588,5 +680,16 @@ mod tests {
         );
         ws.apply_update_object(&payload).unwrap();
         assert!(!ws.other_players.contains_key(&0));
+    }
+
+    #[test]
+    fn update_object_create_gameobject_stationary_with_extras_parses() {
+        // Real dump from user: create object (TYPEID_GAMEOBJECT=5) with stationary position
+        // plus extra updateflag data (transport + lowguid + rotation).
+        let payload = hex(
+            "0100000002c111c01f055202ae4e04c66439cf440000000061fdc03f1100000092d8cf040000000000000000011f630300110000000000c01f2100000048e802000000803f161d0000280000000000803f0000dafecb250400010f00ff",
+        );
+        let mut ws = WorldState::new();
+        ws.apply_update_object(&payload).unwrap();
     }
 }
