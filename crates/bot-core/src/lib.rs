@@ -4,6 +4,7 @@
 //! experiments, etc.) can share the same state model + prompting/LLM adapters.
 
 pub mod llm;
+pub mod agent;
 pub mod player;
 pub mod vision;
 pub mod world;

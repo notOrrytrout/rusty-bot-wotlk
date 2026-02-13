@@ -9,7 +9,7 @@ set -euo pipefail
 # Optional env:
 #   RUSTY_BOT_CONFIG_DIR (default: <repo>/config)
 #   MOCK_OLLAMA_INCLUDE_EMOTES=1 to include emotes in the rotating responses
-#   MOCK_OLLAMA_TOOL_CALLS=1 to emit `<tool_call>{...}</tool_call>` wrapped JSON responses (recommended)
+#   MOCK_OLLAMA_TOOL_CALLS=1 to emit `<tool_call>{...}</tool_call>` wrapped JSON responses (default: 1)
 #   RUSTY_BOT_DEMO=1 (default: 1)
 #   RUSTY_BOT_REAL_CLIENT=1 (default: 1) - required by bot contract if bot is enabled in config
 
@@ -116,6 +116,7 @@ else
   kill_listeners_on_port "7878"
 fi
 
+MOCK_OLLAMA_TOOL_CALLS="${MOCK_OLLAMA_TOOL_CALLS:-1}" \
 python3 "${ROOT_DIR}/scripts/mock_ollama.py" --host "${HOST}" --port "${PORT}" >/tmp/mock_ollama.log 2>&1 &
 MOCK_PID=$!
 echo "${MOCK_PID}" >/tmp/rusty_bot_mock_ollama.pid
