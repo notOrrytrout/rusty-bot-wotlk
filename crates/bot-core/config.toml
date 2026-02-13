@@ -1,0 +1,13 @@
+username = "bot{}"
+password = "password"
+host = "127.0.0.1"
+port = 3724
+realm = "AzerothCore"
+
+[ollama]
+model = "llama3"
+url = "http://localhost:11434"
+
+[bot]
+character_index = 0
+count = 1500
