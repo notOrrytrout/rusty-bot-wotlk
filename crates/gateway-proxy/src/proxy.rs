@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use rusty_bot_core::agent::ToolCall as AgentToolCall;
+use rusty_bot_core::agent::ToolCallWire as AgentToolCallWire;
 use rusty_bot_core::agent::ToolInvocation as AgentToolInvocation;
 use rusty_bot_core::agent::game_api::GameApi as AgentGameApi;
 use rusty_bot_core::agent::harness::{
@@ -730,6 +731,7 @@ async fn handle_world_session(
         upstream_tx.clone(),
         downstream_inject_tx.clone(),
         injection_guard.clone(),
+        world_state.clone(),
         agent_tx.clone(),
     ));
     let demo_task = if agent_enabled {
@@ -1214,10 +1216,13 @@ enum AgentControlCommand {
     Enable(bool),
     SetGoal(String),
     ClearGoal,
+    OfferTool(AgentToolInvocation),
     Status {
         reply: oneshot::Sender<serde_json::Value>,
     },
 }
+
+const CONTROL_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -1236,6 +1241,10 @@ enum ControlRequest {
     },
     ClearGoal {},
     Status {},
+    Observation {},
+    Tool {
+        tool: AgentToolCallWire,
+    },
 }
 
 #[derive(Debug)]
@@ -1262,8 +1271,26 @@ fn parse_opcode_u16(opcode: &str) -> anyhow::Result<u16> {
 fn parse_control_input_line(line: &str) -> anyhow::Result<ControlInput> {
     let trimmed = line.trim();
     if trimmed.starts_with('{') {
-        let req: ControlRequest =
+        let mut v: serde_json::Value =
             serde_json::from_str(trimmed).with_context(|| "invalid json control request")?;
+
+        let version = v.get("version").and_then(|v| v.as_u64()).map(|v| v as u32);
+        if let Some(version) = version {
+            if version != CONTROL_PROTOCOL_VERSION {
+                anyhow::bail!(
+                    "unsupported control protocol version: {} (expected {})",
+                    version,
+                    CONTROL_PROTOCOL_VERSION
+                );
+            }
+        }
+
+        if let serde_json::Value::Object(obj) = &mut v {
+            obj.remove("version");
+        }
+
+        let req: ControlRequest =
+            serde_json::from_value(v).with_context(|| "invalid json control request")?;
         return Ok(ControlInput::Json(req));
     }
     Ok(ControlInput::Legacy(parse_control_line(trimmed)?))
@@ -1274,8 +1301,10 @@ async fn serve_control(
     upstream_tx: mpsc::Sender<WorldPacket>,
     downstream_tx: mpsc::Sender<WorldPacket>,
     injection_guard: Arc<Mutex<InjectionGuardState>>,
+    world_state: Arc<Mutex<WorldState>>,
     agent_tx: Option<mpsc::Sender<AgentControlCommand>>,
 ) -> anyhow::Result<()> {
+    let control_obs_builder = Arc::new(Mutex::new(AgentObservationBuilder::default()));
     loop {
         let (socket, addr) = listener.accept().await?;
         println!("proxy.control.accepted client={addr}");
@@ -1283,6 +1312,8 @@ async fn serve_control(
         let upstream = upstream_tx.clone();
         let downstream = downstream_tx.clone();
         let guard = injection_guard.clone();
+        let ws = world_state.clone();
+        let obs_builder = control_obs_builder.clone();
         let agent_tx = agent_tx.clone();
         tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(socket);
@@ -1336,6 +1367,8 @@ async fn serve_control(
                             &upstream,
                             &downstream,
                             &guard,
+                            &ws,
+                            &obs_builder,
                             agent_tx.as_ref(),
                         )
                         .await;
@@ -1365,6 +1398,8 @@ async fn handle_control_json(
     upstream: &mpsc::Sender<WorldPacket>,
     downstream: &mpsc::Sender<WorldPacket>,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
+    world_state: &Arc<Mutex<WorldState>>,
+    obs_builder: &Arc<Mutex<AgentObservationBuilder>>,
     agent_tx: Option<&mpsc::Sender<AgentControlCommand>>,
 ) -> anyhow::Result<String> {
     match req {
@@ -1433,6 +1468,44 @@ async fn handle_control_json(
                 .map_err(|_| anyhow::anyhow!("agent_status_reply_dropped"))?;
             Ok(v.to_string())
         }
+        ControlRequest::Observation {} => {
+            let now = Instant::now();
+            let guard = injection_guard.lock().await;
+            let self_guid = guard.last_self_guid.unwrap_or(0);
+            let client_correction_seen_recently = guard
+                .last_client_correction_at
+                .map(|t| now.duration_since(t) < Duration::from_secs(2))
+                .unwrap_or(false);
+            drop(guard);
+
+            let ws = world_state.lock().await;
+            let mut b = obs_builder.lock().await;
+            let obs = b.build(
+                &ws,
+                AgentObservationInputs {
+                    self_guid,
+                    client_correction_seen_recently,
+                },
+            );
+
+            Ok(serde_json::json!({
+                "ok": true,
+                "op": "observation",
+                "observation": obs
+            })
+            .to_string())
+        }
+        ControlRequest::Tool { tool } => {
+            let Some(tx) = agent_tx else {
+                anyhow::bail!("agent_control_unavailable");
+            };
+            let inv = AgentToolInvocation::try_from(tool)
+                .map_err(|e| anyhow::anyhow!("invalid tool: {e}"))?;
+            tx.send(AgentControlCommand::OfferTool(inv))
+                .await
+                .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
+            Ok(serde_json::json!({ "ok": true, "op": "tool" }).to_string())
+        }
     }
 }
 
@@ -1473,6 +1546,16 @@ mod control_port_tests {
             ControlInput::Json(ControlRequest::Status {})
         ));
 
+        let json_v1 = r#"{"version":1,"op":"status"}"#;
+        let input = parse_control_input_line(json_v1).unwrap();
+        assert!(matches!(
+            input,
+            ControlInput::Json(ControlRequest::Status {})
+        ));
+
+        let json_bad_ver = r#"{"version":999,"op":"status"}"#;
+        assert!(parse_control_input_line(json_bad_ver).is_err());
+
         let legacy = "0x00a9 deadbeef";
         let input = parse_control_input_line(legacy).unwrap();
         assert!(matches!(input, ControlInput::Legacy(_)));
@@ -1489,6 +1572,16 @@ mod control_port_tests {
             }
             other => panic!("unexpected input: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_control_input_line_tool_json() {
+        let json = r#"{"op":"tool","tool":{"name":"request_idle","arguments":{}}}"#;
+        let input = parse_control_input_line(json).unwrap();
+        assert!(matches!(
+            input,
+            ControlInput::Json(ControlRequest::Tool { .. })
+        ));
     }
 }
 
@@ -2506,6 +2599,9 @@ async fn run_agent_llm_injector(
                     }
                     AgentControlCommand::ClearGoal => {
                         agent.memory.clear_goal();
+                    }
+                    AgentControlCommand::OfferTool(tool) => {
+                        agent.executor.offer_llm_tool(tool);
                     }
                     AgentControlCommand::Status { reply } => {
                         let _ = reply.send(serde_json::json!({
