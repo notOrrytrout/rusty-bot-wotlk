@@ -19,6 +19,12 @@ pub struct DerivedFacts {
     /// Euclidean distance moved since the last observation frame (if available).
     #[serde(default)]
     pub self_dist_moved: Option<f32>,
+    /// Change in orientation since the last observation frame (if available).
+    #[serde(default)]
+    pub self_orient_delta: Option<f32>,
+    /// Absolute orientation delta since the last observation frame (if available).
+    #[serde(default)]
+    pub self_abs_orient_delta: Option<f32>,
     /// Change in the client movement timestamp (if available).
     #[serde(default)]
     pub self_movement_time_delta: Option<i64>,
@@ -153,6 +159,7 @@ impl Observation {
 #[derive(Debug, Default)]
 pub struct ObservationBuilder {
     last_self_pos: Option<Vec3>,
+    last_orient: Option<f32>,
     last_movement_time: Option<u64>,
 }
 
@@ -179,10 +186,25 @@ impl ObservationBuilder {
                     Some(self_state.movement_time as i64 - prev_time as i64);
             }
 
+            if let Some(prev_orient) = self.last_orient {
+                let mut delta = self_state.orient - prev_orient;
+                // Wrap to [-pi, pi] to avoid discontinuity when crossing 2*pi.
+                const PI: f32 = std::f32::consts::PI;
+                if delta > PI {
+                    delta -= 2.0 * PI;
+                } else if delta < -PI {
+                    delta += 2.0 * PI;
+                }
+                obs.derived.self_orient_delta = Some(delta);
+                obs.derived.self_abs_orient_delta = Some(delta.abs());
+            }
+
             self.last_self_pos = Some(self_state.pos);
+            self.last_orient = Some(self_state.orient);
             self.last_movement_time = Some(self_state.movement_time);
         } else {
             self.last_self_pos = None;
+            self.last_orient = None;
             self.last_movement_time = None;
         }
 

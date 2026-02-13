@@ -4,6 +4,26 @@ use super::memory::ToolResult;
 use super::wire::{RequestMoveArgs, RequestStopArgs, RequestTurnArgs, StopKind};
 use super::ToolCall;
 
+pub trait ToolMeta {
+    fn is_continuous(&self) -> bool;
+    fn default_timeout(&self) -> Duration;
+    fn auto_stop_after(&self) -> Option<ToolCall>;
+}
+
+impl ToolMeta for ToolCall {
+    fn is_continuous(&self) -> bool {
+        is_continuous(self)
+    }
+
+    fn default_timeout(&self) -> Duration {
+        default_timeout(self)
+    }
+
+    fn auto_stop_after(&self) -> Option<ToolCall> {
+        auto_stop_after(self)
+    }
+}
+
 pub fn is_continuous(tool: &ToolCall) -> bool {
     matches!(tool, ToolCall::RequestMove(_) | ToolCall::RequestTurn(_))
 }
@@ -42,4 +62,3 @@ pub fn ok(reason: impl Into<String>) -> ToolResult {
         facts: serde_json::Value::Null,
     }
 }
-

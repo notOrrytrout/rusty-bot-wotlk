@@ -15,6 +15,12 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use rusty_bot_core::player::player_state::PlayerCurrentState;
+use rusty_bot_core::agent::game_api::GameApi as AgentGameApi;
+use rusty_bot_core::agent::memory::{ToolResult as AgentToolResult, ToolStatus as AgentToolStatus};
+use rusty_bot_core::agent::observation::ObservationBuilder as AgentObservationBuilder;
+use rusty_bot_core::agent::r#loop::AgentLoop;
+use rusty_bot_core::agent::tools::ToolMeta;
+use rusty_bot_core::agent::ToolCall as AgentToolCall;
 use rusty_bot_core::vision::generate_prompt as generate_vision_prompt;
 use rusty_bot_core::world::world_state::WorldState;
 
@@ -715,12 +721,24 @@ async fn handle_world_session(
         downstream_inject_tx.clone(),
         injection_guard.clone(),
     ));
-    let demo_task = tokio::spawn(run_demo_llm_injector(
-        upstream_tx.clone(),
-        downstream_inject_tx.clone(),
-        injection_guard.clone(),
-        world_state.clone(),
-    ));
+    let agent_enabled = std::env::var("RUSTY_BOT_AGENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let demo_task = if agent_enabled {
+        tokio::spawn(run_agent_llm_injector(
+            upstream_tx.clone(),
+            downstream_inject_tx.clone(),
+            injection_guard.clone(),
+            world_state.clone(),
+        ))
+    } else {
+        tokio::spawn(run_demo_llm_injector(
+            upstream_tx.clone(),
+            downstream_inject_tx.clone(),
+            injection_guard.clone(),
+            world_state.clone(),
+        ))
+    };
 
     tokio::select! {
         result = client_reader => {
@@ -1737,6 +1755,266 @@ async fn run_demo_llm_injector(
                 baseline_client_time: state.last_client_move_time,
                 timeout,
             });
+        }
+    }
+}
+
+struct ProxyAgentApi {
+    upstream_tx: mpsc::Sender<WorldPacket>,
+    downstream_tx: mpsc::Sender<WorldPacket>,
+    injection_guard: Arc<Mutex<InjectionGuardState>>,
+    world_state: Arc<Mutex<WorldState>>,
+    observation_builder: Mutex<AgentObservationBuilder>,
+    echo_to_client: bool,
+}
+
+impl ProxyAgentApi {
+    fn tool_to_demo_command(tool: &AgentToolCall) -> Vec<String> {
+        use rusty_bot_core::agent::wire::{MoveDirection, StopKind, TurnDirection};
+        match tool {
+            AgentToolCall::RequestIdle => vec!["move stop".to_string()],
+            AgentToolCall::RequestJump => vec!["jump".to_string()],
+            AgentToolCall::RequestEmote(args) => vec![format!("emote {}", args.key)],
+            AgentToolCall::RequestMove(args) => {
+                let cmd = match args.direction {
+                    MoveDirection::Forward => "move forward",
+                    MoveDirection::Backward => "move backward",
+                    MoveDirection::Left => "move left",
+                    MoveDirection::Right => "move right",
+                };
+                vec![cmd.to_string()]
+            }
+            AgentToolCall::RequestTurn(args) => {
+                let cmd = match args.direction {
+                    TurnDirection::Left => "turn left",
+                    TurnDirection::Right => "turn right",
+                };
+                vec![cmd.to_string()]
+            }
+            AgentToolCall::RequestStop(args) => match args.kind {
+                StopKind::Move => vec!["move stop".to_string()],
+                StopKind::Turn => vec!["turn stop".to_string()],
+                StopKind::Strafe => vec!["strafe stop".to_string()],
+                StopKind::All => vec![
+                    "turn stop".to_string(),
+                    "strafe stop".to_string(),
+                    "move stop".to_string(),
+                ],
+            },
+        }
+    }
+}
+
+impl AgentGameApi for ProxyAgentApi {
+    fn observe<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<rusty_bot_core::agent::observation::Observation>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let self_guid = self.injection_guard.lock().await.last_self_guid.unwrap_or(0);
+            let ws = self.world_state.lock().await;
+            let mut b = self.observation_builder.lock().await;
+            Ok(b.build(&ws, self_guid))
+        })
+    }
+
+    fn execute_tool<'a>(
+        &'a self,
+        tool: AgentToolCall,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<AgentToolResult>> + Send + 'a>> {
+        Box::pin(async move {
+            let cmds = Self::tool_to_demo_command(&tool);
+            if cmds.is_empty() {
+                return Ok(AgentToolResult {
+                    status: AgentToolStatus::Failed,
+                    reason: "no_command".to_string(),
+                    facts: serde_json::Value::Null,
+                });
+            }
+
+            for cmd in cmds {
+                let Some(packet) = prepare_demo_packet(&cmd, &self.injection_guard).await else {
+                    return Ok(AgentToolResult {
+                        status: AgentToolStatus::Retryable,
+                        reason: "missing_movement_template".to_string(),
+                        facts: serde_json::json!({ "cmd": cmd }),
+                    });
+                };
+                let Some(packet) = apply_injection_guard(packet, &self.injection_guard).await else {
+                    return Ok(AgentToolResult {
+                        status: AgentToolStatus::Retryable,
+                        reason: "injection_suppressed".to_string(),
+                        facts: serde_json::json!({ "cmd": cmd }),
+                    });
+                };
+                send_injected_packet(packet, &self.upstream_tx, &self.downstream_tx, self.echo_to_client)
+                    .await
+                    .with_context(|| format!("inject cmd={cmd}"))?;
+            }
+
+            Ok(AgentToolResult {
+                status: AgentToolStatus::Ok,
+                reason: "injected".to_string(),
+                facts: serde_json::Value::Null,
+            })
+        })
+    }
+}
+
+async fn run_agent_llm_injector(
+    upstream_tx: mpsc::Sender<WorldPacket>,
+    downstream_tx: mpsc::Sender<WorldPacket>,
+    injection_guard: Arc<Mutex<InjectionGuardState>>,
+    world_state: Arc<Mutex<WorldState>>,
+) -> anyhow::Result<()> {
+    let enabled = std::env::var("RUSTY_BOT_DEMO")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !enabled {
+        println!("proxy.bot.agent disabled");
+        return Ok(());
+    }
+
+    let endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:11435/api/generate".to_string());
+    let model = std::env::var("RUSTY_BOT_LLM_MODEL").unwrap_or_else(|_| "mock".to_string());
+    let use_vision = std::env::var("RUSTY_BOT_DEMO_USE_VISION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let system_prompt = std::env::var("RUSTY_BOT_LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
+        "You control a WoW character. Choose exactly one tool call per tick based on STATE_JSON. Prefer safe, minimal actions."
+            .to_string()
+    });
+    let goal = std::env::var("RUSTY_BOT_GOAL").ok();
+    let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
+    println!("proxy.bot.agent enabled endpoint={endpoint} model={model} use_vision={use_vision}");
+
+    let api = ProxyAgentApi {
+        upstream_tx,
+        downstream_tx,
+        injection_guard: injection_guard.clone(),
+        world_state: world_state.clone(),
+        observation_builder: Mutex::new(AgentObservationBuilder::default()),
+        echo_to_client,
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1200))
+        .build()?;
+    let mut tick = tokio::time::interval(Duration::from_millis(350));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    let mut agent = AgentLoop::new(system_prompt);
+    if let Some(goal) = goal {
+        agent.memory.set_goal(goal);
+    }
+
+    loop {
+        tick.tick().await;
+
+        // Observe first. If observation fails, prefer doing nothing.
+        let obs = match api.observe().await {
+            Ok(obs) => obs,
+            Err(err) => {
+                eprintln!("proxy.bot.agent observe_failed error={err:#}");
+                continue;
+            }
+        };
+
+        // Completion checks.
+        if let Some((tool, result)) = agent.executor.tick_observation(&obs) {
+            println!("proxy.bot.agent complete tool={tool:?} status={:?} reason={}", result.status, result.reason);
+            agent.memory.record(tool, result);
+            continue;
+        }
+        if let Some((tool, result)) = agent.executor.tick_timeout(std::time::Instant::now()) {
+            println!("proxy.bot.agent timeout tool={tool:?} status={:?} reason={}", result.status, result.reason);
+            agent.memory.record(tool, result);
+            continue;
+        }
+
+        // Execute any queued tools (e.g. auto-stop) before polling the LLM.
+        if let Some(tool) = agent.executor.next_to_execute() {
+            let inject_res = api.execute_tool(tool.clone()).await?;
+            if tool.is_continuous() {
+                if inject_res.status == AgentToolStatus::Ok {
+                    agent.executor.start(tool, std::time::Instant::now());
+                } else {
+                    agent.memory.record(tool, inject_res);
+                }
+            } else {
+                agent.memory.record(tool, inject_res);
+            }
+            continue;
+        }
+
+        // If idle and nothing queued, ask the LLM for the next tool call.
+        if agent.executor.is_idle() {
+            let mut prompt_str = agent.build_prompt(&obs);
+
+            if use_vision {
+                let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
+                let ws = world_state.lock().await;
+                let vision = generate_vision_prompt(&ws, guid);
+                prompt_str.push_str("\n[LEGACY_VISION]\n");
+                prompt_str.push_str(&vision);
+            }
+
+            let response = match client
+                .post(&endpoint)
+                .json(&serde_json::json!({
+                    "model": model,
+                    "prompt": prompt_str,
+                    "stream": false
+                }))
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    eprintln!("proxy.bot.agent poll_failed error={err:#}");
+                    // When the LLM is down, do not keep issuing movement. Prefer hard stops.
+                    for stop in [
+                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs { kind: rusty_bot_core::agent::wire::StopKind::Turn }),
+                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs { kind: rusty_bot_core::agent::wire::StopKind::Strafe }),
+                        AgentToolCall::RequestStop(rusty_bot_core::agent::wire::RequestStopArgs { kind: rusty_bot_core::agent::wire::StopKind::Move }),
+                    ] {
+                        let _ = api.execute_tool(stop).await;
+                    }
+                    continue;
+                }
+            };
+
+            let payload: serde_json::Value = match response.error_for_status() {
+                Ok(response) => response.json().await.unwrap_or(serde_json::Value::Null),
+                Err(err) => {
+                    eprintln!("proxy.bot.agent status_failed error={err:#}");
+                    continue;
+                }
+            };
+
+            let script = payload
+                .get("response")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    payload
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("");
+
+            match agent.parse_llm_tool_call(script) {
+                Ok(tool) => agent.executor.offer_llm_tool(tool),
+                Err(err) => {
+                    agent.memory.last_error = Some(format!("{err:#}"));
+                    println!("proxy.bot.agent llm_tool_parse_failed error={err:#}");
+                }
+            }
         }
     }
 }

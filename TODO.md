@@ -97,15 +97,15 @@ MVP high-level goals (first set to support end-to-end):
   - [x] Derived flags: `moving`, `stuck_suspected` (and deltas for completion checks)
   - [ ] Derived flags: `in_combat` (placeholder until supported)
 - [x] Define a `GameApi` trait boundary (agent calls this; proxy implements it):
-  - [ ] “Inject action” surface (prefer high-level, not opcodes)
-  - [ ] “Read observation inputs” surface (world snapshot)
+  - [x] “Inject action” surface (prefer high-level, not opcodes)
+  - [x] “Read observation inputs” surface (world snapshot)
 
 ### 2) Implement `bot-core` Agent Module (Framework Code)
 Add a new module under:
 `crates/bot-core/src/agent/`
 
 - [x] `mod.rs` exports:
-  - [ ] `AgentLoop`
+  - [x] `AgentLoop`
   - [x] `Observation` (type exists; will expand as we add derived facts)
   - [x] `ToolCall`
   - [x] `ToolResult` (type exists; wire-up to execution is next)
@@ -153,16 +153,16 @@ Acceptance checks
 - [ ] Continuous tools never leave the character “stuck turning/running” if the LLM hangs (executor must auto-stop).
 
 ### 4) Proxy Integration (Implement `GameApi`)
-- [ ] Introduce a proxy-side `GameApi` implementation that wraps existing injection channels + world state.
+- [x] Introduce a proxy-side `GameApi` implementation that wraps existing injection channels + world state.
 - [ ] Extract the movement-template injection logic from the demo into reusable methods:
   - [ ] “get template”
   - [ ] “build movement packet for command”
   - [ ] “apply injection guard”
   - [ ] “send packet” (upstream/both routing)
-- [ ] Replace (or gate behind a new flag) `run_demo_llm_injector` with an agent loop tick:
-  - [ ] Periodic tick reads observation
-  - [ ] If executor idle, call LLM for next tool
-  - [ ] Execute tool and wait for completion
+- [x] Replace (or gate behind a new flag) `run_demo_llm_injector` with an agent loop tick:
+  - [x] Periodic tick reads observation
+  - [x] If executor idle, call LLM for next tool
+  - [x] Execute tool and wait for completion (v1: observation + duration-based completion)
 
 Acceptance checks
 - [ ] Agent runs with the same `RUSTY_BOT_LLM_ENDPOINT` and still supports `RUSTY_BOT_DEMO_USE_VISION=1`.

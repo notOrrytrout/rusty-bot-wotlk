@@ -8,12 +8,15 @@
 
 pub mod executor;
 pub mod game_api;
+pub mod r#loop;
 pub mod memory;
 pub mod observation;
 pub mod prompt;
 pub mod tools;
-mod wire;
+pub mod wire;
 
 pub use wire::{
     extract_tool_call_json, parse_tool_call, ToolCall, ToolCallWire, ToolParseError,
 };
+
+pub use r#loop::AgentLoop;

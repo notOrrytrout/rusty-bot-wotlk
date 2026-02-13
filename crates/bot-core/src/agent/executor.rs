@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::memory::{ToolResult, ToolStatus};
 use super::tools::{auto_stop_after, default_timeout, is_continuous};
+use super::observation::Observation;
 use super::ToolCall;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,11 +89,75 @@ impl Executor {
             self.queue.push_front(ToolCall::RequestIdle);
         }
 
+        let cont = is_continuous(&tool);
         Some((
             tool,
             ToolResult {
-                status: ToolStatus::Retryable,
-                reason: "timeout".to_string(),
+                status: if cont { ToolStatus::Ok } else { ToolStatus::Retryable },
+                reason: if cont {
+                    "duration_elapsed".to_string()
+                } else {
+                    "timeout".to_string()
+                },
+                facts: serde_json::Value::Null,
+            },
+        ))
+    }
+
+    pub fn tick_observation(
+        &mut self,
+        obs: &Observation,
+    ) -> Option<(ToolCall, ToolResult)> {
+        let ExecutorState::Waiting { tool, stop_after, .. } = &self.state else {
+            return None;
+        };
+
+        if obs.self_state.is_none() {
+            return None;
+        }
+
+        let moved = obs
+            .derived
+            .self_dist_moved
+            .map(|d| d >= 0.25)
+            .unwrap_or(false)
+            || obs
+                .derived
+                .self_movement_time_delta
+                .map(|d| d != 0)
+                .unwrap_or(false);
+        let turned = obs
+            .derived
+            .self_abs_orient_delta
+            .map(|d| d >= 0.05)
+            .unwrap_or(false);
+
+        let complete = match tool {
+            ToolCall::RequestMove(_) => moved,
+            ToolCall::RequestTurn(_) => turned,
+            _ => false,
+        };
+        if !complete {
+            return None;
+        }
+
+        let tool = tool.clone();
+        let stop_after = stop_after.clone();
+        self.state = ExecutorState::Idle;
+        if let Some(stop_tool) = stop_after {
+            self.queue.push_front(stop_tool);
+        }
+
+        let reason = if matches!(tool, ToolCall::RequestTurn(_)) {
+            "turned"
+        } else {
+            "moved"
+        };
+        Some((
+            tool,
+            ToolResult {
+                status: ToolStatus::Ok,
+                reason: reason.to_string(),
                 facts: serde_json::Value::Null,
             },
         ))
