@@ -12,7 +12,8 @@ pub struct PromptConfig {
 impl Default for PromptConfig {
     fn default() -> Self {
         Self {
-            tool_call_contract: "Return exactly one <tool_call> JSON block and nothing else.\n\nFormat:\n<tool_call>\n{\"name\":\"request_idle\",\"arguments\":{}}\n</tool_call>".to_string(),
+            tool_call_contract: "Return exactly one <tool_call>...</tool_call> block and nothing else.\nInside the block, return JSON object: {\"name\":\"...\",\"arguments\":{...}} (optional: \"confirm\": true).\nDo not include markdown, code fences, or any other text.\n\nFormat:\n<tool_call>\n{\"name\":\"request_idle\",\"arguments\":{}}\n</tool_call>"
+                .to_string(),
             tool_list: "Allowed tool calls:\n- request_move {\"direction\":\"forward|backward|left|right\",\"duration_ms\":150..5000}\n- request_turn {\"direction\":\"left|right\",\"duration_ms\":150..5000}\n- request_stop {\"kind\":\"move|turn|strafe|all\"}\n- request_jump {}\n- request_emote {\"key\":\"wave|hello|bye|cheer|dance|laugh|clap|salute\"}\n- request_idle {}".to_string(),
         }
     }
@@ -105,6 +106,7 @@ mod tests {
         assert!(prompt.contains("request_idle"));
 
         assert!(prompt.contains("[CONTRACT]"));
+        assert!(prompt.contains("exactly one <tool_call>"));
         assert!(prompt.contains("<tool_call>"));
         assert!(prompt.contains("\"name\""));
         assert!(prompt.contains("\"arguments\""));
