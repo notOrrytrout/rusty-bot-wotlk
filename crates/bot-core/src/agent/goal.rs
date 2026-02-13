@@ -35,9 +35,7 @@ impl GoalPlan {
         let interact = t.contains("interact");
         let stop_distance = 3.5_f32;
 
-        let (verb, rest) = t
-            .split_once(' ')
-            .unwrap_or_else(|| (t.as_str(), ""));
+        let (verb, rest) = t.split_once(' ').unwrap_or_else(|| (t.as_str(), ""));
 
         let guid = extract_u64_kv(&t, "guid")
             .or_else(|| extract_u64_kv(&t, "target_guid"))
@@ -60,28 +58,16 @@ impl GoalPlan {
             }
             "goto" | "go" => {
                 if let Some(g) = guid {
-                    GoalKind::GotoGuid {
-                        guid: g,
-                        interact,
-                    }
+                    GoalKind::GotoGuid { guid: g, interact }
                 } else if let Some(e) = entry {
-                    GoalKind::GotoNpcEntry {
-                        entry: e,
-                        interact,
-                    }
+                    GoalKind::GotoNpcEntry { entry: e, interact }
                 } else {
                     // allow "go to ..." as two tokens
                     if verb == "go" && rest.starts_with("to") {
                         if let Some(g) = guid {
-                            GoalKind::GotoGuid {
-                                guid: g,
-                                interact,
-                            }
+                            GoalKind::GotoGuid { guid: g, interact }
                         } else if let Some(e) = entry {
-                            GoalKind::GotoNpcEntry {
-                                entry: e,
-                                interact,
-                            }
+                            GoalKind::GotoNpcEntry { entry: e, interact }
                         } else {
                             return None;
                         }
@@ -160,8 +146,7 @@ impl GoalPlan {
             } else {
                 TurnDirection::Right
             };
-            let ms = ((delta.abs() / std::f32::consts::PI) * 900.0)
-                .clamp(150.0, 900.0) as u32;
+            let ms = ((delta.abs() / std::f32::consts::PI) * 900.0).clamp(150.0, 900.0) as u32;
             return Some(ToolInvocation {
                 call: ToolCall::RequestTurn(RequestTurnArgs {
                     direction,
@@ -255,13 +240,23 @@ mod tests {
     use super::*;
     use crate::agent::observation::{DerivedFacts, Observation, SelfSummary};
 
-    fn base_obs(self_orient: f32, npc_guid: u64, entry: u32, npc_x: f32, npc_y: f32) -> Observation {
+    fn base_obs(
+        self_orient: f32,
+        npc_guid: u64,
+        entry: u32,
+        npc_x: f32,
+        npc_y: f32,
+    ) -> Observation {
         Observation {
             tick: 1,
             self_guid: 1,
             self_state: Some(SelfSummary {
                 guid: 1,
-                pos: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+                pos: Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
                 orient: self_orient,
                 movement_flags: 0,
                 movement_time: 1,
@@ -271,7 +266,11 @@ mod tests {
             npcs_nearby: vec![EntitySummary {
                 guid: npc_guid,
                 entry: Some(entry),
-                pos: Vec3 { x: npc_x, y: npc_y, z: 0.0 },
+                pos: Vec3 {
+                    x: npc_x,
+                    y: npc_y,
+                    z: 0.0,
+                },
                 hp: None,
             }],
             players_nearby: vec![],
@@ -311,4 +310,3 @@ mod tests {
         assert!(matches!(second.call, ToolCall::RequestMove(_)));
     }
 }
-

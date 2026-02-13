@@ -494,12 +494,17 @@ mod tests {
 
         // Observation includes the matching NPC.
         let mut obs = base_obs(1);
-        obs.npcs_nearby.push(crate::agent::observation::EntitySummary {
-            guid: 9,
-            entry: Some(55),
-            pos: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
-            hp: None,
-        });
+        obs.npcs_nearby
+            .push(crate::agent::observation::EntitySummary {
+                guid: 9,
+                entry: Some(55),
+                pos: Vec3 {
+                    x: 10.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                hp: None,
+            });
         api.push_observation(obs);
 
         let now = Instant::now();

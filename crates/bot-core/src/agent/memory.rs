@@ -132,8 +132,7 @@ impl AgentMemory {
 
         // Preserve a copy for goal completion checks below.
         let tool_for_goal = tool.clone();
-        self.history
-            .push_back(HistoryEntry { tool, result });
+        self.history.push_back(HistoryEntry { tool, result });
         while self.history.len() > self.history_limit {
             self.history.pop_front();
         }
