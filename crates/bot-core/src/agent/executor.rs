@@ -184,6 +184,11 @@ impl Executor {
             return None;
         }
 
+        // Stuck detection: if we appear to be translating but not making progress for several frames,
+        // treat the current move tool as failed so the LLM can choose a recovery action (turn, jump, etc).
+        let stuck_move =
+            matches!(tool.call, ToolCall::RequestMove(_)) && obs.derived.stuck_suspected;
+
         let moved = obs
             .derived
             .self_dist_moved
@@ -204,7 +209,7 @@ impl Executor {
             ToolInvocation {
                 call: ToolCall::RequestMove(_),
                 ..
-            } => moved,
+            } => stuck_move || moved,
             ToolInvocation {
                 call: ToolCall::RequestTurn(_),
                 ..
@@ -222,16 +227,23 @@ impl Executor {
             self.queue.push_front(stop_tool);
         }
 
-        let reason = if matches!(tool.call, ToolCall::RequestTurn(_)) {
-            "turned"
+        let (status, reason) = if matches!(tool.call, ToolCall::RequestTurn(_)) {
+            (ToolStatus::Ok, "turned".to_string())
+        } else if stuck_move {
+            let why = obs
+                .derived
+                .stuck_reason
+                .clone()
+                .unwrap_or_else(|| "stuck_suspected".to_string());
+            (ToolStatus::Failed, format!("stuck: {why}"))
         } else {
-            "moved"
+            (ToolStatus::Ok, "moved".to_string())
         };
         Some((
             tool,
             ToolResult {
-                status: ToolStatus::Ok,
-                reason: reason.to_string(),
+                status,
+                reason,
                 facts: serde_json::Value::Null,
             },
         ))
@@ -300,7 +312,9 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::observation::{DerivedFacts, Observation, SelfSummary, Vec3};
     use crate::agent::wire::{MoveDirection, RequestMoveArgs};
+    use crate::agent::wire::{RequestStopArgs, StopKind};
 
     #[test]
     fn continuous_move_auto_stops() {
@@ -324,6 +338,66 @@ mod tests {
             ToolCall::RequestStop(_) => {}
             other => panic!("expected stop, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn move_completes_failed_when_stuck_suspected_and_auto_stops() {
+        let mut ex = Executor::default();
+        let tool = ToolInvocation {
+            call: ToolCall::RequestMove(RequestMoveArgs {
+                direction: MoveDirection::Forward,
+                duration_ms: 150,
+            }),
+            confirm: false,
+        };
+
+        let now = Instant::now();
+        ex.start(tool.clone(), now);
+
+        let obs = Observation {
+            tick: 1,
+            self_guid: 1,
+            self_state: Some(SelfSummary {
+                guid: 1,
+                pos: Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                orient: 0.0,
+                movement_flags: 0,
+                movement_time: 1,
+                hp: (1, 1),
+                level: 1,
+            }),
+            npcs_nearby: vec![],
+            players_nearby: vec![],
+            chat_log: vec![],
+            combat_log: vec![],
+            derived: DerivedFacts {
+                stuck_suspected: true,
+                stuck_frames: 99,
+                stuck_reason: Some("translating_no_progress".to_string()),
+                ..DerivedFacts::default()
+            },
+        };
+
+        let (done_tool, res) = ex.tick_observation(&obs).expect("complete");
+        assert_eq!(done_tool, tool);
+        assert_eq!(res.status, ToolStatus::Failed);
+        assert!(res.reason.contains("stuck"));
+
+        // Auto-stop should still be enqueued.
+        let next = ex.next_to_execute().expect("stop");
+        assert_eq!(
+            next,
+            ToolInvocation {
+                call: ToolCall::RequestStop(RequestStopArgs {
+                    kind: StopKind::Move
+                }),
+                confirm: false
+            }
+        );
     }
 
     #[test]

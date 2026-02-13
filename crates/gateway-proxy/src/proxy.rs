@@ -17,6 +17,10 @@ use tokio::time::{Instant, MissedTickBehavior};
 use rusty_bot_core::agent::ToolCall as AgentToolCall;
 use rusty_bot_core::agent::ToolInvocation as AgentToolInvocation;
 use rusty_bot_core::agent::game_api::GameApi as AgentGameApi;
+use rusty_bot_core::agent::harness::{
+    HarnessConfig as AgentHarnessConfig, HarnessOutcome as AgentHarnessOutcome,
+    LlmCallSuppressed as AgentLlmCallSuppressed, LlmClient as AgentLlmClient, tick as agent_tick,
+};
 use rusty_bot_core::agent::r#loop::AgentLoop;
 use rusty_bot_core::agent::memory::{ToolResult as AgentToolResult, ToolStatus as AgentToolStatus};
 use rusty_bot_core::agent::observation::{
@@ -311,23 +315,22 @@ async fn send_injected_packet(
     downstream_tx: &mpsc::Sender<WorldPacket>,
     echo_to_client: bool,
 ) -> anyhow::Result<()> {
-    match route_for_opcode(packet.opcode) {
-        InjectRoute::UpstreamOnly => {
-            if echo_to_client {
-                if let Ok(op_u16) = u16::try_from(packet.opcode) {
-                    if is_world_move_opcode(op_u16) {
-                        upstream_tx.send(packet.clone()).await?;
-                        downstream_tx.send(packet).await?;
-                        return Ok(());
-                    }
-                }
-            }
-            upstream_tx.send(packet).await?;
-        }
-        InjectRoute::Both => {
+    // Echoing injected packets to the client is risky: the client expects server->client packets
+    // on that lane, and forwarding client->server opcodes can freeze/disconnect the client.
+    // Keep it opt-in for local experimentation only.
+    let unsafe_echo_to_client = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if matches!(route_for_opcode(packet.opcode), InjectRoute::UpstreamOnly) {
+        if echo_to_client && unsafe_echo_to_client {
+            // Historically used for demo/local testing. Do not enable in normal runs.
             upstream_tx.send(packet.clone()).await?;
             downstream_tx.send(packet).await?;
+            return Ok(());
         }
+        upstream_tx.send(packet).await?;
+        return Ok(());
     }
     Ok(())
 }
@@ -335,7 +338,6 @@ async fn send_injected_packet(
 #[derive(Debug, Clone, Copy)]
 enum InjectRoute {
     UpstreamOnly,
-    Both,
 }
 
 fn route_for_opcode(opcode: u32) -> InjectRoute {
@@ -349,9 +351,8 @@ fn route_for_opcode(opcode: u32) -> InjectRoute {
         }
     }
 
-    // Default: preserve legacy behavior (send to both directions). This is useful
-    // for manual testing via the control port.
-    InjectRoute::Both
+    // Default: injected packets should go upstream only. Echoing to the client is unsafe.
+    InjectRoute::UpstreamOnly
 }
 
 #[derive(Default, Debug)]
@@ -1226,20 +1227,17 @@ async fn serve_control(
                             Some(packet) => packet,
                             None => continue,
                         };
-                        match route_for_opcode(packet.opcode) {
-                            InjectRoute::UpstreamOnly => {
-                                if upstream.send(packet).await.is_err() {
-                                    break;
-                                }
-                            }
-                            InjectRoute::Both => {
-                                if upstream.send(packet.clone()).await.is_err() {
-                                    break;
-                                }
-                                if downstream.send(packet).await.is_err() {
-                                    break;
-                                }
-                            }
+                        if upstream.send(packet.clone()).await.is_err() {
+                            break;
+                        }
+
+                        // Opt-in only: raw control-port injection is already sharp; echoing it to the
+                        // client can freeze/disconnect the client.
+                        let unsafe_echo = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+                        if unsafe_echo {
+                            let _ = downstream.send(packet).await;
                         }
                     }
                     Err(err) => {
@@ -1434,7 +1432,7 @@ async fn run_demo_llm_injector(
     println!("proxy.bot.demo enabled endpoint={endpoint} model={model}");
     let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let injector = MovementTemplateInjector::new(
         upstream_tx.clone(),
@@ -2015,6 +2013,85 @@ impl AgentGameApi for ProxyAgentApi {
     }
 }
 
+#[derive(Debug)]
+struct ProxyLlmClient {
+    client: reqwest::Client,
+    endpoint: String,
+    model: String,
+    limiter: Arc<Mutex<RateLimiter>>,
+}
+
+#[derive(Debug)]
+struct LlmPollFailed(reqwest::Error);
+
+impl std::fmt::Display for LlmPollFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "llm_poll_failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for LlmPollFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+impl AgentLlmClient for ProxyLlmClient {
+    fn complete<'a>(
+        &'a self,
+        prompt: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // LLM call rate limiting is handled here so the harness only consumes a token when it
+            // actually needs to poll the model.
+            let ok = self
+                .limiter
+                .lock()
+                .await
+                .allow_llm_call(std::time::Instant::now());
+            if !ok {
+                return Err(anyhow::Error::new(AgentLlmCallSuppressed));
+            }
+
+            let resp = self
+                .client
+                .post(&self.endpoint)
+                .json(&serde_json::json!({
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": false
+                }))
+                .send()
+                .await
+                .map_err(|e| anyhow::Error::new(LlmPollFailed(e)))?;
+
+            let resp = resp
+                .error_for_status()
+                .map_err(|e| anyhow::Error::new(LlmPollFailed(e)))?;
+
+            let payload: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::Error::new(LlmPollFailed(e)))?;
+
+            let script = payload
+                .get("response")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    payload
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("")
+                .to_string();
+
+            Ok(script)
+        })
+    }
+}
+
 async fn run_agent_llm_injector(
     upstream_tx: mpsc::Sender<WorldPacket>,
     downstream_tx: mpsc::Sender<WorldPacket>,
@@ -2042,7 +2119,7 @@ async fn run_agent_llm_injector(
     let goal = std::env::var("RUSTY_BOT_GOAL").ok();
     let echo_to_client = std::env::var("RUSTY_BOT_DEMO_ECHO_TO_CLIENT")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+        .unwrap_or(false);
     let max_llm_calls_per_min: usize = std::env::var("RUSTY_BOT_LLM_MAX_CALLS_PER_MIN")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -2071,6 +2148,12 @@ async fn run_agent_llm_injector(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(1200))
         .build()?;
+    let llm = ProxyLlmClient {
+        client,
+        endpoint: endpoint.clone(),
+        model: model.clone(),
+        limiter: limiter.clone(),
+    };
     let mut tick = tokio::time::interval(Duration::from_millis(350));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -2079,89 +2162,37 @@ async fn run_agent_llm_injector(
         agent.memory.set_goal(goal);
     }
 
-    let repair_instruction = "Your previous response was invalid.\nReturn exactly one <tool_call>...</tool_call> block and nothing else.\nThe JSON must be an object with keys: name, arguments (and optional confirm).\n";
-
     loop {
         tick.tick().await;
 
-        // Observe first. If observation fails, prefer doing nothing.
-        let obs = match api.observe().await {
-            Ok(obs) => obs,
-            Err(err) => {
-                eprintln!("proxy.bot.agent observe_failed error={err:#}");
-                continue;
-            }
+        let prompt_suffix = if use_vision {
+            let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
+            let ws = world_state.lock().await;
+            let vision = generate_vision_prompt(&ws, guid);
+            Some(format!("\n[LEGACY_VISION]\n{vision}"))
+        } else {
+            None
         };
 
-        // Completion checks.
-        if let Some((tool, result)) = agent.executor.tick_observation(&obs) {
-            println!(
-                "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
-                result.status, result.reason
-            );
-            agent.memory.record(tool, result);
-            continue;
-        }
-        if let Some((tool, result)) = agent.executor.tick_timeout(std::time::Instant::now()) {
-            println!(
-                "proxy.bot.agent timeout tool={tool:?} status={:?} reason={}",
-                result.status, result.reason
-            );
-            agent.memory.record(tool, result);
-            continue;
-        }
+        let cfg = AgentHarnessConfig {
+            enable_repair: true,
+            prompt_suffix,
+        };
 
-        // Execute any queued tools (e.g. auto-stop) before polling the LLM.
-        agent.executor.tick_backoff(std::time::Instant::now());
-        if let Some(tool) = agent.executor.next_to_execute() {
-            let now = std::time::Instant::now();
-            agent.executor.start(tool.clone(), now);
-            let inject_res = api.execute_tool(tool.clone()).await?;
-
-            // Continuous tools run until observation/timeouts say they're complete.
-            if tool.is_continuous() && inject_res.status == AgentToolStatus::Ok {
-                continue;
+        let now = std::time::Instant::now();
+        let out = agent_tick(&mut agent, &api, &llm, cfg, now).await;
+        match out {
+            Ok(AgentHarnessOutcome::Completed { tool, result }) => {
+                println!(
+                    "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
+                    result.status, result.reason
+                );
             }
-
-            if let Some((done_tool, done_res)) = agent.executor.complete(now, inject_res) {
-                agent.memory.record(done_tool, done_res);
-            }
-            continue;
-        }
-
-        // If idle and nothing queued, ask the LLM for the next tool call.
-        if agent.executor.is_idle() {
-            let mut prompt_str = agent.build_prompt(&obs);
-
-            if use_vision {
-                let guid = injection_guard.lock().await.last_self_guid.unwrap_or(0);
-                let ws = world_state.lock().await;
-                let vision = generate_vision_prompt(&ws, guid);
-                prompt_str.push_str("\n[LEGACY_VISION]\n");
-                prompt_str.push_str(&vision);
-            }
-
-            // LLM call rate limiting.
-            let llm_call_ok = limiter
-                .lock()
-                .await
-                .allow_llm_call(std::time::Instant::now());
-            if !llm_call_ok {
-                continue;
-            }
-
-            let response = match client
-                .post(&endpoint)
-                .json(&serde_json::json!({
-                    "model": model,
-                    "prompt": prompt_str,
-                    "stream": false
-                }))
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
+            Ok(AgentHarnessOutcome::Executed { .. })
+            | Ok(AgentHarnessOutcome::Offered { .. })
+            | Ok(AgentHarnessOutcome::Observed) => {}
+            Err(err) => {
+                if err.is::<LlmPollFailed>() {
                     eprintln!("proxy.bot.agent poll_failed error={err:#}");
                     // When the LLM is down, do not keep issuing movement. Prefer hard stops.
                     for stop in [
@@ -2194,100 +2225,7 @@ async fn run_agent_llm_injector(
                     }
                     continue;
                 }
-            };
-
-            let payload: serde_json::Value = match response.error_for_status() {
-                Ok(response) => response.json().await.unwrap_or(serde_json::Value::Null),
-                Err(err) => {
-                    eprintln!("proxy.bot.agent status_failed error={err:#}");
-                    continue;
-                }
-            };
-
-            let script = payload
-                .get("response")
-                .and_then(serde_json::Value::as_str)
-                .or_else(|| {
-                    payload
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(serde_json::Value::as_str)
-                })
-                .unwrap_or("");
-
-            let parsed = agent.parse_llm_tool_call(script);
-            let tool = match parsed {
-                Ok(tool) => Some(tool),
-                Err(err) => {
-                    agent.memory.last_error = Some(format!("{err:#}"));
-                    println!("proxy.bot.agent llm_tool_parse_failed error={err:#}");
-
-                    // One-shot repair reprompt (no injection on failure).
-                    let repair_prompt = format!(
-                        "{prompt_str}\n\n[REPAIR]\n{repair_instruction}\n[INVALID_OUTPUT]\n{script}\n"
-                    );
-
-                    let llm_call_ok = limiter
-                        .lock()
-                        .await
-                        .allow_llm_call(std::time::Instant::now());
-                    if !llm_call_ok {
-                        None
-                    } else {
-                        match client
-                            .post(&endpoint)
-                            .json(&serde_json::json!({
-                                "model": model,
-                                "prompt": repair_prompt,
-                                "stream": false
-                            }))
-                            .send()
-                            .await
-                        {
-                            Ok(repair_resp) => {
-                                let repair_payload: serde_json::Value =
-                                    match repair_resp.error_for_status() {
-                                        Ok(r) => r.json().await.unwrap_or(serde_json::Value::Null),
-                                        Err(err) => {
-                                            agent.memory.last_error =
-                                                Some(format!("repair_status_failed: {err:#}"));
-                                            serde_json::Value::Null
-                                        }
-                                    };
-                                let repair_script = repair_payload
-                                    .get("response")
-                                    .and_then(serde_json::Value::as_str)
-                                    .or_else(|| {
-                                        repair_payload
-                                            .get("message")
-                                            .and_then(|m| m.get("content"))
-                                            .and_then(serde_json::Value::as_str)
-                                    })
-                                    .unwrap_or("");
-                                match agent.parse_llm_tool_call(repair_script) {
-                                    Ok(tool) => Some(tool),
-                                    Err(err) => {
-                                        agent.memory.last_error =
-                                            Some(format!("repair_parse_failed: {err:#}"));
-                                        println!(
-                                            "proxy.bot.agent llm_tool_repair_failed error={err:#}"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                agent.memory.last_error =
-                                    Some(format!("repair_poll_failed: {err:#}"));
-                                None
-                            }
-                        }
-                    }
-                }
-            };
-
-            if let Some(tool) = tool {
-                agent.executor.offer_llm_tool(tool);
+                return Err(err);
             }
         }
     }
