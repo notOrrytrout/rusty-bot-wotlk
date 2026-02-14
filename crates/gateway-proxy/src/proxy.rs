@@ -14,6 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{fs::OpenOptions, io::Write};
 
@@ -42,6 +43,23 @@ use crate::wotlk::movement::{
 use crate::wotlk::opcode::Opcode;
 use crate::wotlk::rc4::{Decryptor, Encryptor};
 use crate::wotlk::srp::Srp;
+
+fn verbose_enabled() -> bool {
+    static VERBOSE: OnceLock<bool> = OnceLock::new();
+    *VERBOSE.get_or_init(|| {
+        std::env::var("RUSTY_BOT_VERBOSE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+macro_rules! vprintln {
+    ($($arg:tt)*) => {{
+        if verbose_enabled() {
+            ::std::println!($($arg)*);
+        }
+    }};
+}
 
 // Local gateway config types (kept separate from any client/protocol library config).
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -372,7 +390,7 @@ pub async fn run_proxy() -> anyhow::Result<()> {
             .with_context(|| format!("bind control listener {}", gateway.proxy.control_listen))?,
     );
 
-    println!(
+    vprintln!(
         "proxy.started login={} world={} control={} auth_upstream={}",
         gateway.proxy.login_listen,
         gateway.proxy.world_listen,
@@ -390,7 +408,7 @@ pub async fn run_proxy() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 let (client_stream, client_addr) = login_listener.accept().await?;
-                println!("proxy.login.accepted client={client_addr}");
+                vprintln!("proxy.login.accepted client={client_addr}");
 
                 match handle_login_session(
                     client_stream,
@@ -429,12 +447,13 @@ pub async fn run_proxy() -> anyhow::Result<()> {
                 .await
                 .ok_or_else(|| anyhow::anyhow!("world session channel closed"))?;
 
-            println!(
+            vprintln!(
                 "proxy.world.waiting upstream={} client_listen={}",
-                session.upstream_world_addr, gateway.proxy.world_listen
+                session.upstream_world_addr,
+                gateway.proxy.world_listen
             );
             let (client_stream, client_addr) = world_listener.accept().await?;
-            println!("proxy.world.accepted client={client_addr}");
+            vprintln!("proxy.world.accepted client={client_addr}");
 
             match handle_world_session(
                 client_stream,
@@ -444,7 +463,7 @@ pub async fn run_proxy() -> anyhow::Result<()> {
             )
             .await
             {
-                Ok(()) => println!("proxy.world.closed"),
+                Ok(()) => vprintln!("proxy.world.closed"),
                 Err(err) => eprintln!("proxy.world.error {err:#}"),
             }
         }
@@ -463,17 +482,17 @@ async fn handle_login_session(
     password: &str,
     proxy_world_addr: &str,
 ) -> anyhow::Result<WorldSession> {
-    println!("proxy.login.stage connect_upstream");
+    vprintln!("proxy.login.stage connect_upstream");
     let mut upstream = TcpStream::connect(auth_upstream)
         .await
         .with_context(|| format!("connect auth upstream {auth_upstream}"))?;
 
-    println!("proxy.login.stage read_client_challenge");
+    vprintln!("proxy.login.stage read_client_challenge");
     let login_challenge = read_client_login_challenge(&mut client).await?;
-    println!("proxy.login.stage write_upstream_challenge");
+    vprintln!("proxy.login.stage write_upstream_challenge");
     upstream.write_all(&login_challenge).await?;
 
-    println!("proxy.login.stage read_upstream_challenge");
+    vprintln!("proxy.login.stage read_upstream_challenge");
     let upstream_challenge = read_upstream_challenge(&mut upstream).await?;
     let mut downstream_srp = SrpServer::new(
         account.to_string(),
@@ -481,13 +500,13 @@ async fn handle_login_session(
         &upstream_challenge.n,
         &upstream_challenge.g,
     );
-    println!("proxy.login.stage send_downstream_challenge");
+    vprintln!("proxy.login.stage send_downstream_challenge");
     send_downstream_challenge(&mut client, &upstream_challenge, &downstream_srp).await?;
 
-    println!("proxy.login.stage read_client_proof");
+    vprintln!("proxy.login.stage read_client_proof");
     let (client_a, client_m1) = read_client_proof(&mut client).await?;
     let client_m2 = downstream_srp.verify_client_proof(client_a, client_m1)?;
-    println!("proxy.login.stage send_client_proof_ok");
+    vprintln!("proxy.login.stage send_client_proof_ok");
     send_client_proof_ok(&mut client, client_m2).await?;
 
     let mut upstream_srp = Srp::default();
@@ -500,9 +519,9 @@ async fn handle_login_session(
     upstream_srp.calculate_session_key(account, password);
     let upstream_m1 = upstream_srp.calculate_proof(account);
     let upstream_a = upstream_srp.public_ephemeral();
-    println!("proxy.login.stage send_upstream_proof");
+    vprintln!("proxy.login.stage send_upstream_proof");
     send_upstream_proof(&mut upstream, upstream_a, upstream_m1).await?;
-    println!("proxy.login.stage read_upstream_proof_response");
+    vprintln!("proxy.login.stage read_upstream_proof_response");
     let upstream_m2 = read_upstream_proof_response(&mut upstream).await?;
     if !upstream_srp.validate_proof(upstream_m2) {
         anyhow::bail!("Upstream server proof mismatch");
@@ -510,15 +529,15 @@ async fn handle_login_session(
     let upstream_key = upstream_srp.session_key;
     let client_key = downstream_srp.session_key;
 
-    println!("proxy.login.stage read_client_realmlist_request");
+    vprintln!("proxy.login.stage read_client_realmlist_request");
     read_client_realmlist_request(&mut client).await?;
-    println!("proxy.login.stage send_upstream_realmlist_request");
+    vprintln!("proxy.login.stage send_upstream_realmlist_request");
     send_upstream_realmlist_request(&mut upstream).await?;
-    println!("proxy.login.stage read_upstream_realmlist_response");
+    vprintln!("proxy.login.stage read_upstream_realmlist_response");
     let upstream_realmlist_body = read_upstream_realmlist_response(&mut upstream).await?;
     let (rewritten_realmlist_body, upstream_world_addr) =
         rewrite_realmlist_addresses(&upstream_realmlist_body, proxy_world_addr)?;
-    println!("proxy.login.stage send_client_realmlist_response");
+    vprintln!("proxy.login.stage send_client_realmlist_response");
     send_client_realmlist_response(&mut client, &rewritten_realmlist_body).await?;
 
     let proxy_world_addr = proxy_world_addr.to_string();
@@ -528,7 +547,7 @@ async fn handle_login_session(
         }
     });
 
-    println!("proxy.login.stage done upstream_world_addr={upstream_world_addr}");
+    vprintln!("proxy.login.stage done upstream_world_addr={upstream_world_addr}");
     Ok(WorldSession {
         account: account.to_string(),
         client_key,
@@ -543,7 +562,7 @@ async fn handle_world_session(
     control_listener: Arc<TcpListener>,
     bot_llm: LlmConfig,
 ) -> anyhow::Result<()> {
-    println!(
+    vprintln!(
         "proxy.world.keys client_key_len={} server_key_len={}",
         session.client_key.len(),
         session.server_key.len()
@@ -601,11 +620,45 @@ async fn handle_world_session(
         "proxy->client",
     ));
 
-    // The in-proxy agent loop is the only runner. It can be enabled/disabled at runtime via the
-    // control port (`op=agent_enable`), so we always start the control channel.
-    let (agent_tx, agent_rx) = {
+    // Always create a control-side API so an external runner can drive the proxy via the control port.
+    let max_llm_calls_per_min: usize = std::env::var("RUSTY_BOT_LLM_MAX_CALLS_PER_MIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let max_injections_per_sec: usize = std::env::var("RUSTY_BOT_INJECT_MAX_PER_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25);
+    let echo_to_client = std::env::var("RUSTY_BOT_UNSAFE_ECHO_INJECTED_TO_CLIENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let limiter = Arc::new(Mutex::new(RateLimiter::new(
+        max_llm_calls_per_min,
+        max_injections_per_sec,
+    )));
+    let api = Arc::new(ProxyAgentApi {
+        upstream_tx: upstream_tx.clone(),
+        downstream_tx: downstream_inject_tx.clone(),
+        injection_guard: injection_guard.clone(),
+        world_state: world_state.clone(),
+        observation_builder: Mutex::new(AgentObservationBuilder::default()),
+        echo_to_client,
+        limiter,
+    });
+
+    // Optional in-proxy agent loop (legacy). Prefer running `rusty-bot-runner` externally.
+    let spawn_in_proxy_agent = std::env::var("RUSTY_BOT_IN_PROXY_AGENT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || std::env::var("RUSTY_BOT_AGENT_ENABLED")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    let (agent_tx, agent_rx) = if spawn_in_proxy_agent {
         let (tx, rx) = mpsc::channel::<AgentControlCommand>(32);
-        (Some(tx), rx)
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
     };
 
     let control_task = tokio::spawn(serve_control(
@@ -613,22 +666,24 @@ async fn handle_world_session(
         upstream_tx.clone(),
         downstream_inject_tx.clone(),
         injection_guard.clone(),
-        world_state.clone(),
+        api,
         agent_tx.clone(),
     ));
-    let agent_task = tokio::spawn(run_agent_llm_injector(
-        upstream_tx.clone(),
-        downstream_inject_tx.clone(),
-        injection_guard.clone(),
-        world_state.clone(),
-        agent_rx,
-        bot_llm,
-    ));
+    let agent_task = agent_rx.map(|agent_rx| {
+        tokio::spawn(run_agent_llm_injector(
+            upstream_tx.clone(),
+            downstream_inject_tx.clone(),
+            injection_guard.clone(),
+            world_state.clone(),
+            agent_rx,
+            bot_llm,
+        ))
+    });
 
     tokio::select! {
         result = client_reader => {
             match result {
-                Ok(Ok(())) => println!("proxy.world.end lane=client_reader result=ok"),
+                Ok(Ok(())) => vprintln!("proxy.world.end lane=client_reader result=ok"),
                 Ok(Err(err)) => {
                     eprintln!("proxy.world.end lane=client_reader error={err:#}");
                     return Err(err);
@@ -641,7 +696,7 @@ async fn handle_world_session(
         }
         result = upstream_reader => {
             match result {
-                Ok(Ok(())) => println!("proxy.world.end lane=upstream_reader result=ok"),
+                Ok(Ok(())) => vprintln!("proxy.world.end lane=upstream_reader result=ok"),
                 Ok(Err(err)) => {
                     eprintln!("proxy.world.end lane=upstream_reader error={err:#}");
                     return Err(err);
@@ -654,7 +709,7 @@ async fn handle_world_session(
         }
         result = upstream_writer => {
             match result {
-                Ok(Ok(())) => println!("proxy.world.end lane=upstream_writer result=ok"),
+                Ok(Ok(())) => vprintln!("proxy.world.end lane=upstream_writer result=ok"),
                 Ok(Err(err)) => {
                     eprintln!("proxy.world.end lane=upstream_writer error={err:#}");
                     return Err(err);
@@ -667,7 +722,7 @@ async fn handle_world_session(
         }
         result = downstream_writer => {
             match result {
-                Ok(Ok(())) => println!("proxy.world.end lane=downstream_writer result=ok"),
+                Ok(Ok(())) => vprintln!("proxy.world.end lane=downstream_writer result=ok"),
                 Ok(Err(err)) => {
                     eprintln!("proxy.world.end lane=downstream_writer error={err:#}");
                     return Err(err);
@@ -681,7 +736,9 @@ async fn handle_world_session(
     }
 
     control_task.abort();
-    agent_task.abort();
+    if let Some(agent_task) = agent_task {
+        agent_task.abort();
+    }
     Ok(())
 }
 
@@ -702,7 +759,7 @@ async fn read_world_packets(
             .with_context(|| format!("{lane} read_world_packet"))?;
         packet_count += 1;
         if packet_count <= EARLY_PACKET_TRACE_LIMIT {
-            println!(
+            vprintln!(
                 "proxy.world.rx lane={} idx={} opcode=0x{:04x} body_len={} decrypt_active={}",
                 lane,
                 packet_count,
@@ -738,7 +795,7 @@ async fn read_client_world_packets(
         // - the user can steer/turn while the bot runs
         .unwrap_or(false);
     if suppress_client_movement {
-        println!("proxy.bot suppress_client_movement=true");
+        vprintln!("proxy.bot suppress_client_movement=true");
     }
 
     // First world packet from client is CMSG_AUTH_SESSION and must be read plaintext.
@@ -750,7 +807,7 @@ async fn read_client_world_packets(
             .with_context(|| format!("{lane} read_world_packet"))?;
         packet_count += 1;
         if packet_count <= EARLY_PACKET_TRACE_LIMIT {
-            println!(
+            vprintln!(
                 "proxy.world.rx lane={} idx={} opcode=0x{:04x} body_len={} decrypt_active={}",
                 lane,
                 packet_count,
@@ -841,7 +898,7 @@ async fn write_client_world_packets(
     while let Some(packet) = rx.recv().await {
         packet_count += 1;
         if packet_count <= EARLY_PACKET_TRACE_LIMIT {
-            println!(
+            vprintln!(
                 "proxy.world.tx lane={} idx={} opcode=0x{:04x} body_len={} encrypt_active={}",
                 lane,
                 packet_count,
@@ -869,7 +926,7 @@ async fn write_server_world_packets(
     while let Some(packet) = rx.recv().await {
         packet_count += 1;
         if packet_count <= EARLY_PACKET_TRACE_LIMIT {
-            println!(
+            vprintln!(
                 "proxy.world.tx lane={} idx={} opcode=0x{:04x} body_len={} encrypt_active={}",
                 lane,
                 packet_count,
@@ -895,9 +952,11 @@ async fn record_auth_boundary_observation(
 
     if lane == "client->proxy" && opcode == CMSG_AUTH_SESSION_OPCODE {
         if !state.client_auth_session_seen {
-            println!(
+            vprintln!(
                 "proxy.world.auth.client_auth_session_seen lane={} idx={} opcode=0x{:04x}",
-                lane, idx, opcode
+                lane,
+                idx,
+                opcode
             );
         }
         state.client_auth_session_seen = true;
@@ -912,9 +971,11 @@ async fn record_auth_boundary_observation(
 
     if lane == "server->proxy" && opcode == SMSG_AUTH_CHALLENGE_OPCODE {
         state.server_auth_challenge_count += 1;
-        println!(
+        vprintln!(
             "proxy.world.auth.server_auth_challenge count={} lane={} idx={}",
-            state.server_auth_challenge_count, lane, idx
+            state.server_auth_challenge_count,
+            lane,
+            idx
         );
         if state.server_auth_challenge_count > 1
             && !state.client_auth_session_seen
@@ -940,7 +1001,7 @@ async fn update_auth_rewrite_state_from_server_packet(
 
     if packet.opcode == SMSG_AUTH_RESPONSE_OPCODE && !packet.body.is_empty() {
         let status = packet.body[0];
-        println!(
+        vprintln!(
             "proxy.world.auth.server_auth_response status=0x{:02x} body_len={}",
             status,
             packet.body.len()
@@ -955,9 +1016,13 @@ async fn update_auth_rewrite_state_from_server_packet(
     seed.copy_from_slice(&packet.body[4..8]);
     let mut state = auth_rewrite.lock().await;
     state.server_seed = Some(seed);
-    println!(
+    vprintln!(
         "proxy.world.auth.server_seed_captured opcode=0x{:04x} seed={:02x}{:02x}{:02x}{:02x}",
-        packet.opcode, seed[0], seed[1], seed[2], seed[3]
+        packet.opcode,
+        seed[0],
+        seed[1],
+        seed[2],
+        seed[3]
     );
 }
 
@@ -983,9 +1048,10 @@ async fn maybe_rewrite_client_auth_session(
         &state.expected_account,
     ) {
         Ok(account) => {
-            println!(
+            vprintln!(
                 "proxy.world.auth.rewrite_cmsg_auth_session account={} opcode=0x{:04x}",
-                account, packet.opcode
+                account,
+                packet.opcode
             );
         }
         Err(err) => {
@@ -1034,9 +1100,12 @@ fn rewrite_cmsg_auth_session_digest(
         .finalize();
 
     body[digest_offset..digest_offset + 20].copy_from_slice(&digest);
-    println!(
+    vprintln!(
         "proxy.world.auth.rewrite_offsets account_start={} account_end={} client_seed_offset={} digest_offset={}",
-        account_start, account_end, client_seed_offset, digest_offset
+        account_start,
+        account_end,
+        client_seed_offset,
+        digest_offset
     );
     Ok(account)
 }
@@ -1139,10 +1208,6 @@ enum AgentControlCommand {
     SetGoal(String),
     ClearGoal,
     OfferTool(AgentToolInvocation),
-    ExecuteTool {
-        tool: AgentToolInvocation,
-        reply: oneshot::Sender<AgentToolResult>,
-    },
     Status {
         reply: oneshot::Sender<serde_json::Value>,
     },
@@ -1228,19 +1293,17 @@ async fn serve_control(
     upstream_tx: mpsc::Sender<WorldPacket>,
     downstream_tx: mpsc::Sender<WorldPacket>,
     injection_guard: Arc<Mutex<InjectionGuardState>>,
-    world_state: Arc<Mutex<WorldState>>,
+    api: Arc<ProxyAgentApi>,
     agent_tx: Option<mpsc::Sender<AgentControlCommand>>,
 ) -> anyhow::Result<()> {
-    let control_obs_builder = Arc::new(Mutex::new(AgentObservationBuilder::default()));
     loop {
         let (socket, addr) = listener.accept().await?;
-        println!("proxy.control.accepted client={addr}");
+        vprintln!("proxy.control.accepted client={addr}");
 
         let upstream = upstream_tx.clone();
         let downstream = downstream_tx.clone();
         let guard = injection_guard.clone();
-        let ws = world_state.clone();
-        let obs_builder = control_obs_builder.clone();
+        let api = api.clone();
         let agent_tx = agent_tx.clone();
         tokio::spawn(async move {
             let (read, mut write) = tokio::io::split(socket);
@@ -1294,8 +1357,7 @@ async fn serve_control(
                             &upstream,
                             &downstream,
                             &guard,
-                            &ws,
-                            &obs_builder,
+                            &api,
                             agent_tx.as_ref(),
                         )
                         .await;
@@ -1325,8 +1387,7 @@ async fn handle_control_json(
     upstream: &mpsc::Sender<WorldPacket>,
     downstream: &mpsc::Sender<WorldPacket>,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
-    world_state: &Arc<Mutex<WorldState>>,
-    obs_builder: &Arc<Mutex<AgentObservationBuilder>>,
+    api: &ProxyAgentApi,
     agent_tx: Option<&mpsc::Sender<AgentControlCommand>>,
 ) -> anyhow::Result<String> {
     match req {
@@ -1396,25 +1457,7 @@ async fn handle_control_json(
             Ok(v.to_string())
         }
         ControlRequest::Observation {} => {
-            let now = Instant::now();
-            let guard = injection_guard.lock().await;
-            let self_guid = guard.last_self_guid.unwrap_or(0);
-            let client_correction_seen_recently = guard
-                .last_client_correction_at
-                .map(|t| now.duration_since(t) < Duration::from_secs(2))
-                .unwrap_or(false);
-            drop(guard);
-
-            let ws = world_state.lock().await;
-            let mut b = obs_builder.lock().await;
-            let obs = b.build(
-                &ws,
-                AgentObservationInputs {
-                    self_guid,
-                    client_correction_seen_recently,
-                },
-            );
-
+            let obs = api.observe().await?;
             Ok(serde_json::json!({
                 "ok": true,
                 "op": "observation",
@@ -1434,29 +1477,9 @@ async fn handle_control_json(
             Ok(serde_json::json!({ "ok": true, "op": "tool" }).to_string())
         }
         ControlRequest::ToolExecute { tool } => {
-            let Some(tx) = agent_tx else {
-                anyhow::bail!("agent_control_unavailable");
-            };
             let inv = AgentToolInvocation::try_from(tool)
                 .map_err(|e| anyhow::anyhow!("invalid tool: {e}"))?;
-
-            // Immediate execution is intended for safe discrete actions (stop/idle/jump/emote).
-            // Continuous movement should go through the normal executor loop.
-            if inv.is_continuous() {
-                anyhow::bail!("tool_execute does not support continuous tools");
-            }
-
-            let (reply_tx, reply_rx) = oneshot::channel();
-            tx.send(AgentControlCommand::ExecuteTool {
-                tool: inv,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("agent_control_channel_closed"))?;
-
-            let res = reply_rx
-                .await
-                .map_err(|_| anyhow::anyhow!("agent_execute_reply_dropped"))?;
+            let res = api.execute_tool(inv).await?;
             Ok(serde_json::json!({ "ok": true, "op": "tool_execute", "result": res }).to_string())
         }
     }
@@ -1614,6 +1637,97 @@ mod tool_packet_tests {
             ProxyAgentApi::pick_nearest_npc_guid(&ws, self_guid, Some(999)),
             None
         );
+    }
+
+    #[test]
+    fn parse_smsg_loot_response_reads_items_and_money() {
+        let guid = 0x0102030405060708u64;
+        let mut body = Vec::new();
+        // PackedGuid encoding is used by AzerothCore's ObjectGuid stream operators.
+        let mut cur = Cursor::new(&mut body);
+        PackedGuid(guid)
+            .write_options(&mut cur, Endian::Little, ())
+            .unwrap();
+        body.push(1); // loot_type (non-zero => LootView follows)
+        body.extend_from_slice(&42u32.to_le_bytes()); // money
+        body.push(1); // item_count
+        body.push(0); // slot
+        body.extend_from_slice(&123u32.to_le_bytes()); // item_id
+        body.extend_from_slice(&2u32.to_le_bytes()); // count
+        body.extend_from_slice(&999u32.to_le_bytes()); // display_id
+        body.extend_from_slice(&0u32.to_le_bytes()); // random_suffix
+        body.extend_from_slice(&0u32.to_le_bytes()); // random_property_id
+        body.push(1); // slot_type
+
+        let pkt = try_parse_smsg_loot_response(&body).unwrap();
+        assert_eq!(pkt.guid, guid);
+        assert_eq!(pkt.money, 42);
+        assert_eq!(pkt.items.len(), 1);
+        assert_eq!(pkt.items[0].slot, 0);
+        assert_eq!(pkt.items[0].item_id, 123);
+        assert_eq!(pkt.items[0].count, 2);
+    }
+
+    #[tokio::test]
+    async fn loot_tool_sends_loot_money_autostore_and_release() -> anyhow::Result<()> {
+        let (up_tx, mut up_rx) = mpsc::channel(16);
+        let (down_tx, _down_rx) = mpsc::channel(16);
+
+        let guid = 0x0102030405060708u64;
+        let injection_guard = Arc::new(Mutex::new(InjectionGuardState::default()));
+        let world_state = Arc::new(Mutex::new({
+            let mut ws = WorldState::new();
+            ws.loot = Some(rusty_bot_core::world::world_state::LootWindowState {
+                source_guid: guid,
+                loot_type: 1,
+                money: 10,
+                items: vec![rusty_bot_core::world::world_state::LootItemView {
+                    slot: 0,
+                    item_id: 123,
+                    count: 1,
+                    display_id: 0,
+                    random_suffix: 0,
+                    random_property_id: 0,
+                    slot_type: 1,
+                }],
+                error: None,
+            });
+            ws
+        }));
+
+        let limiter = Arc::new(Mutex::new(RateLimiter::new(10_000, 10_000)));
+        let api = ProxyAgentApi {
+            upstream_tx: up_tx,
+            downstream_tx: down_tx,
+            injection_guard,
+            world_state,
+            observation_builder: Mutex::new(AgentObservationBuilder::default()),
+            echo_to_client: false,
+            limiter,
+        };
+
+        let res = api
+            .execute_tool(AgentToolInvocation {
+                call: AgentToolCall::Loot(rusty_bot_core::agent::wire::LootArgs { guid }),
+                confirm: false,
+            })
+            .await?;
+        assert_eq!(res.status, AgentToolStatus::Ok);
+
+        let mut opcodes = Vec::new();
+        while let Ok(pkt) = tokio::time::timeout(Duration::from_millis(10), up_rx.recv()).await {
+            let Some(pkt) = pkt else { break };
+            opcodes.push(pkt.opcode);
+            if opcodes.len() >= 4 {
+                break;
+            }
+        }
+
+        assert_eq!(opcodes[0], Opcode::CMSG_LOOT);
+        assert!(opcodes.contains(&Opcode::CMSG_LOOT_MONEY));
+        assert!(opcodes.contains(&Opcode::CMSG_AUTOSTORE_LOOT_ITEM));
+        assert!(opcodes.contains(&Opcode::CMSG_LOOT_RELEASE));
+        Ok(())
     }
 }
 
@@ -2036,6 +2150,10 @@ async fn record_server_world_observation(
     const SMSG_SPELL_COOLDOWN: u16 = 0x0134;
     const SMSG_COOLDOWN_EVENT: u16 = 0x0135;
     const SMSG_MODIFY_COOLDOWN: u16 = 0x0491;
+    const SMSG_LOOT_RESPONSE: u16 = 0x0160;
+    const SMSG_LOOT_RELEASE_RESPONSE: u16 = 0x0161;
+    const SMSG_LOOT_REMOVED: u16 = 0x0162;
+    const SMSG_LOOT_CLEAR_MONEY: u16 = 0x0165;
 
     let Ok(opcode) = u16::try_from(packet.opcode) else {
         return;
@@ -2158,6 +2276,61 @@ async fn record_server_world_observation(
                 }
             }
         }
+        SMSG_LOOT_RESPONSE => match try_parse_smsg_loot_response(&packet.body) {
+            Ok(pkt) => {
+                ws.loot = Some(rusty_bot_core::world::world_state::LootWindowState {
+                    source_guid: pkt.guid,
+                    loot_type: pkt.loot_type,
+                    money: pkt.money,
+                    items: pkt
+                        .items
+                        .iter()
+                        .map(|i| rusty_bot_core::world::world_state::LootItemView {
+                            slot: i.slot,
+                            item_id: i.item_id,
+                            count: i.count,
+                            display_id: i.display_id,
+                            random_suffix: i.random_suffix,
+                            random_property_id: i.random_property_id,
+                            slot_type: i.slot_type,
+                        })
+                        .collect(),
+                    error: pkt.error,
+                });
+                ws.add_combat_message(format!(
+                    "SMSG_LOOT_RESPONSE guid={} type={} money={} items={} err={:?}",
+                    pkt.guid,
+                    pkt.loot_type,
+                    pkt.money,
+                    pkt.items.len(),
+                    pkt.error
+                ));
+            }
+            Err(_) => ws.add_combat_message(format!(
+                "SMSG_LOOT_RESPONSE unparseable len={}",
+                packet.body.len()
+            )),
+        },
+        SMSG_LOOT_REMOVED => {
+            if let Ok(slot) = try_parse_smsg_loot_removed(&packet.body)
+                && let Some(loot) = ws.loot.as_mut()
+            {
+                loot.items.retain(|i| i.slot != slot);
+            }
+        }
+        SMSG_LOOT_CLEAR_MONEY => {
+            if let Some(loot) = ws.loot.as_mut() {
+                loot.money = 0;
+            }
+        }
+        SMSG_LOOT_RELEASE_RESPONSE => {
+            if let Ok((guid, _ok)) = try_parse_smsg_loot_release_response(&packet.body)
+                && let Some(loot) = ws.loot.as_ref()
+                && loot.source_guid == guid
+            {
+                ws.loot = None;
+            }
+        }
         _ => {}
     }
     ws.increment_tick();
@@ -2185,7 +2358,7 @@ fn maybe_dump_update_object(body: &[u8]) {
 
     let prefix_len = 256usize.min(body.len());
     let hex_prefix = hex_prefix(&body[..prefix_len], prefix_len);
-    println!(
+    vprintln!(
         "proxy.world.dump_update_object idx={} len={} hex_prefix={}",
         idx,
         body.len(),
@@ -2204,10 +2377,13 @@ fn maybe_dump_update_object(body: &[u8]) {
 }
 
 fn append_debug_log_line(line: &str) {
-    let path = std::env::var("RUSTY_BOT_DEBUG_LOG_PATH")
+    // Opt-in only: do not write local log files by default.
+    let Some(path) = std::env::var("RUSTY_BOT_DEBUG_LOG_PATH")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "rusty-bot-debug.log".to_string());
+    else {
+        return;
+    };
     let mut f = match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => f,
         Err(_) => return,
@@ -2506,7 +2682,8 @@ impl ProxyAgentApi {
             AgentToolCall::TargetGuid(_)
             | AgentToolCall::TargetNearestNpc(_)
             | AgentToolCall::Interact(_)
-            | AgentToolCall::Cast(_) => vec![],
+            | AgentToolCall::Cast(_)
+            | AgentToolCall::Loot(_) => vec![],
         }
     }
 }
@@ -2636,6 +2813,85 @@ impl AgentGameApi for ProxyAgentApi {
                         status,
                         reason,
                         facts: serde_json::json!({ "guid": guid, "slot": args.slot, "impl": "attackswing_v0" }),
+                    });
+                }
+                AgentToolCall::Loot(args) => {
+                    // Loot v0: open the loot window for guid, loot money, autostore every visible slot,
+                    // then release. This is intentionally simple and relies on server-side loot rules.
+                    let guid = args.guid;
+                    let status = self.send_packet(build_cmsg_loot(guid)).await?;
+                    if status != AgentToolStatus::Ok {
+                        return Ok(AgentToolResult {
+                            status,
+                            reason: "retryable".to_string(),
+                            facts: serde_json::json!({ "guid": guid }),
+                        });
+                    }
+
+                    // Wait briefly for the corresponding SMSG_LOOT_RESPONSE to land in WorldState.
+                    let start = Instant::now();
+                    let mut loot_snapshot: Option<
+                        rusty_bot_core::world::world_state::LootWindowState,
+                    > = None;
+                    while start.elapsed() < Duration::from_millis(1200) {
+                        {
+                            let ws = self.world_state.lock().await;
+                            if let Some(l) = ws.loot.as_ref()
+                                && l.source_guid == guid
+                            {
+                                loot_snapshot = Some(l.clone());
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+
+                    let Some(loot) = loot_snapshot else {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Retryable,
+                            reason: "loot_response_timeout".to_string(),
+                            facts: serde_json::json!({ "guid": guid }),
+                        });
+                    };
+
+                    if let Some(err) = loot.error {
+                        return Ok(AgentToolResult {
+                            status: AgentToolStatus::Failed,
+                            reason: format!("loot_error_{err}"),
+                            facts: serde_json::json!({ "guid": guid, "error": err }),
+                        });
+                    }
+
+                    if loot.money > 0 {
+                        let _ = self.send_packet(build_cmsg_loot_money()).await?;
+                    }
+
+                    let mut looted_item_ids = Vec::new();
+                    for item in loot.items.iter() {
+                        looted_item_ids.push(item.item_id);
+                        let st = self
+                            .send_packet(build_cmsg_autostore_loot_item(item.slot))
+                            .await?;
+                        if st != AgentToolStatus::Ok {
+                            return Ok(AgentToolResult {
+                                status: st,
+                                reason: "retryable".to_string(),
+                                facts: serde_json::json!({ "guid": guid, "slot": item.slot }),
+                            });
+                        }
+                    }
+
+                    let _ = self.send_packet(build_cmsg_loot_release(guid)).await?;
+
+                    return Ok(AgentToolResult {
+                        status: AgentToolStatus::Ok,
+                        reason: "looted".to_string(),
+                        facts: serde_json::json!({
+                            "guid": guid,
+                            "money": loot.money,
+                            "item_count": loot.items.len(),
+                            "item_ids": looted_item_ids,
+                        }),
                     });
                 }
                 _ => {}
@@ -2896,9 +3152,12 @@ async fn run_agent_llm_injector(
         .and_then(|v| v.parse().ok())
         .unwrap_or(1500);
 
-    println!(
+    vprintln!(
         "proxy.bot.agent started enabled={} endpoint={} model={} use_vision={}",
-        start_enabled, endpoint, model, use_vision
+        start_enabled,
+        endpoint,
+        model,
+        use_vision
     );
 
     let limiter = Arc::new(Mutex::new(RateLimiter::new(
@@ -3041,7 +3300,7 @@ async fn run_agent_llm_injector(
                         // Successful model interaction or deterministic stepping; clear any prior backoff.
                         llm_failures = 0;
                         llm_backoff_until = None;
-                        println!(
+                        vprintln!(
                             "proxy.bot.agent complete tool={tool:?} status={:?} reason={}",
                             result.status, result.reason
                         );
@@ -3147,27 +3406,6 @@ async fn run_agent_llm_injector(
                     AgentControlCommand::OfferTool(tool) => {
                         agent.executor.offer_llm_tool(tool);
                     }
-                    AgentControlCommand::ExecuteTool { tool, reply } => {
-                        let mut res = match api.execute_tool(tool.clone()).await {
-                            Ok(res) => res,
-                            Err(err) => AgentToolResult {
-                                status: AgentToolStatus::Failed,
-                                reason: format!("execute_failed: {err:#}"),
-                                facts: serde_json::Value::Null,
-                            },
-                        };
-
-                        // Record it for visibility/debugging; these are still "actions taken".
-                        agent.memory.record(tool, res.clone());
-
-                        // For discrete tools, treat retryable as failed; there is no executor retry path here.
-                        if res.status == AgentToolStatus::Retryable {
-                            res.status = AgentToolStatus::Failed;
-                            res.reason = format!("retryable_in_tool_execute: {}", res.reason);
-                        }
-
-                        let _ = reply.send(res);
-                    }
                     AgentControlCommand::Status { reply } => {
                         let (self_guid, move_mask, has_move_template, last_move_time) = {
                             let g = injection_guard.lock().await;
@@ -3258,6 +3496,44 @@ fn build_cmsg_attackswing(target_guid: u64) -> WorldPacket {
     let _ = PackedGuid(target_guid).write_options(&mut cur, Endian::Little, ());
     WorldPacket {
         opcode: Opcode::CMSG_ATTACKSWING,
+        body,
+    }
+}
+
+fn build_cmsg_loot(target_guid: u64) -> WorldPacket {
+    // AzerothCore WotLK layout (WorldSession::HandleLootOpcode): ObjectGuid (packed).
+    let mut body = Vec::with_capacity(9);
+    let mut cur = Cursor::new(&mut body);
+    let _ = PackedGuid(target_guid).write_options(&mut cur, Endian::Little, ());
+    WorldPacket {
+        opcode: Opcode::CMSG_LOOT,
+        body,
+    }
+}
+
+fn build_cmsg_loot_money() -> WorldPacket {
+    // AzerothCore WotLK layout (WorldSession::HandleLootMoneyOpcode): no payload.
+    WorldPacket {
+        opcode: Opcode::CMSG_LOOT_MONEY,
+        body: Vec::new(),
+    }
+}
+
+fn build_cmsg_autostore_loot_item(slot: u8) -> WorldPacket {
+    // AzerothCore WotLK layout (WorldSession::HandleAutostoreLootItemOpcode): lootSlot(u8).
+    WorldPacket {
+        opcode: Opcode::CMSG_AUTOSTORE_LOOT_ITEM,
+        body: vec![slot],
+    }
+}
+
+fn build_cmsg_loot_release(target_guid: u64) -> WorldPacket {
+    // AzerothCore WotLK layout (WorldSession::HandleLootReleaseOpcode): ObjectGuid (packed).
+    let mut body = Vec::with_capacity(9);
+    let mut cur = Cursor::new(&mut body);
+    let _ = PackedGuid(target_guid).write_options(&mut cur, Endian::Little, ());
+    WorldPacket {
+        opcode: Opcode::CMSG_LOOT_RELEASE,
         body,
     }
 }
@@ -3387,7 +3663,7 @@ fn build_demo_packet_from_template(
     if parsed.is_err() && command.eq_ignore_ascii_case("jump") {
         // Jump is the one demo opcode where the server is very likely to expect
         // a specific payload shape. If we can't parse the template, do not guess.
-        println!(
+        vprintln!(
             "proxy.bot.demo jump_template_unparseable template_opcode=0x{:04x} template_body_len={} action=drop",
             template.opcode,
             template.body.len(),
@@ -3410,7 +3686,7 @@ fn build_demo_packet_from_template(
                     let ok = parsed_mi.movement_flags.contains(MovementFlags::JUMPING)
                         && parsed_mi.jump_info.is_some();
                     if !ok {
-                        println!(
+                        vprintln!(
                             "proxy.bot.demo jump_payload_invalid opcode=0x{:04x} jumping_flag={} jump_info_present={} action=drop",
                             opcode,
                             parsed_mi.movement_flags.contains(MovementFlags::JUMPING),
@@ -3420,7 +3696,7 @@ fn build_demo_packet_from_template(
                     }
                 }
                 Err(_) => {
-                    println!(
+                    vprintln!(
                         "proxy.bot.demo jump_payload_unparseable opcode=0x{:04x} body_len={} action=drop",
                         opcode,
                         body.len(),
@@ -3693,9 +3969,11 @@ async fn apply_injection_guard(
     if client_active_recently && state.client_move_mask != 0 {
         state.suppressed_count = state.suppressed_count.saturating_add(1);
         if state.suppressed_count <= 50 || state.suppressed_count.is_multiple_of(100) {
-            println!(
+            vprintln!(
                 "proxy.control.suppressed opcode=0x{:04x} reason=client-active mask={} count={}",
-                packet.opcode, state.client_move_mask, state.suppressed_count
+                packet.opcode,
+                state.client_move_mask,
+                state.suppressed_count
             );
         }
         return None;
@@ -3703,9 +3981,10 @@ async fn apply_injection_guard(
     if client_correction_recently {
         state.suppressed_count = state.suppressed_count.saturating_add(1);
         if state.suppressed_count <= 50 || state.suppressed_count.is_multiple_of(100) {
-            println!(
+            vprintln!(
                 "proxy.control.suppressed opcode=0x{:04x} reason=client-correction count={}",
-                packet.opcode, state.suppressed_count
+                packet.opcode,
+                state.suppressed_count
             );
         }
         return None;
@@ -3845,6 +4124,97 @@ fn try_parse_smsg_modify_cooldown(body: &[u8]) -> anyhow::Result<(u32, u64, i32)
     Ok((spell_id, guid, delta_ms))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LootItemEntry {
+    slot: u8,
+    item_id: u32,
+    count: u32,
+    display_id: u32,
+    random_suffix: u32,
+    random_property_id: u32,
+    slot_type: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LootResponsePacket {
+    guid: u64,
+    loot_type: u8,
+    money: u32,
+    items: Vec<LootItemEntry>,
+    error: Option<u8>,
+}
+
+fn try_parse_smsg_loot_response(body: &[u8]) -> anyhow::Result<LootResponsePacket> {
+    // AzerothCore WotLK layout (Player::SendLoot):
+    // - guid (packed)
+    // - loot_type (u8)
+    // - if loot_type == LOOT_NONE (0): loot_error (u8)
+    // - else: LootView:
+    //   - gold (u32)
+    //   - item_count (u8)
+    //   - repeated item_count times:
+    //     - loot_slot (u8)
+    //     - LootItem: itemid(u32), count(u32), displayid(u32), randomSuffix(u32), randomPropertyId(u32)
+    //     - slot_type (u8)
+    let mut cur = Cursor::new(body);
+    let guid = PackedGuid::read_options(&mut cur, Endian::Little, ())?.0;
+    let loot_type = ReadBytesExt::read_u8(&mut cur)?;
+
+    if loot_type == 0 {
+        // Error response: next byte is LootError.
+        let error = ReadBytesExt::read_u8(&mut cur)?;
+        return Ok(LootResponsePacket {
+            guid,
+            loot_type,
+            money: 0,
+            items: Vec::new(),
+            error: Some(error),
+        });
+    }
+
+    let money = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+    let item_count = ReadBytesExt::read_u8(&mut cur)? as usize;
+    let mut items = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        let slot = ReadBytesExt::read_u8(&mut cur)?;
+        let item_id = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        let count = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        let display_id = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        let random_suffix = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        let random_property_id = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        let slot_type = ReadBytesExt::read_u8(&mut cur)?;
+        items.push(LootItemEntry {
+            slot,
+            item_id,
+            count,
+            display_id,
+            random_suffix,
+            random_property_id,
+            slot_type,
+        });
+    }
+
+    Ok(LootResponsePacket {
+        guid,
+        loot_type,
+        money,
+        items,
+        error: None,
+    })
+}
+
+fn try_parse_smsg_loot_removed(body: &[u8]) -> anyhow::Result<u8> {
+    let mut cur = Cursor::new(body);
+    Ok(ReadBytesExt::read_u8(&mut cur)?)
+}
+
+fn try_parse_smsg_loot_release_response(body: &[u8]) -> anyhow::Result<(u64, u8)> {
+    let mut cur = Cursor::new(body);
+    let guid = PackedGuid::read_options(&mut cur, Endian::Little, ())?.0;
+    let ok = ReadBytesExt::read_u8(&mut cur)?;
+    Ok((guid, ok))
+}
+
 fn pack_movement_payload(
     guid: PackedGuid,
     movement_info: &MovementInfo,
@@ -3875,9 +4245,13 @@ async fn read_client_login_challenge(stream: &mut TcpStream) -> anyhow::Result<V
     let mut size = [0u8; 2];
     stream.read_exact(&mut size).await?;
     let body_len = u16::from_le_bytes(size) as usize;
-    println!(
+    vprintln!(
         "proxy.login.client_challenge opcode={} unknown=0x{:02x} size_raw={:02x}{:02x} body_len={}",
-        opcode[0], unknown[0], size[0], size[1], body_len
+        opcode[0],
+        unknown[0],
+        size[0],
+        size[1],
+        body_len
     );
 
     let mut body = vec![0u8; body_len];
@@ -4073,7 +4447,7 @@ async fn keep_login_bridge_alive(
     loop {
         let mut opcode = [0u8; 1];
         if client.read_exact(&mut opcode).await.is_err() {
-            println!("proxy.login.keepalive.end reason=client-closed");
+            vprintln!("proxy.login.keepalive.end reason=client-closed");
             return Ok(());
         }
 
@@ -4093,7 +4467,7 @@ async fn keep_login_bridge_alive(
         let (rewritten_realmlist_body, _) =
             rewrite_realmlist_addresses(&upstream_realmlist_body, proxy_world_addr)?;
         send_client_realmlist_response(&mut client, &rewritten_realmlist_body).await?;
-        println!(
+        vprintln!(
             "proxy.login.keepalive.realmlist_refreshed payload_len={}",
             rewritten_realmlist_body.len().saturating_sub(2)
         );
@@ -4124,9 +4498,11 @@ fn rewrite_realmlist_addresses(
         if first_upstream_addr.is_none() {
             first_upstream_addr = Some(upstream_addr.clone());
         }
-        println!(
+        vprintln!(
             "proxy.login.realm_rewrite name=\"{}\" upstream_addr={} rewritten_addr={}",
-            name, upstream_addr, proxy_world_addr
+            name,
+            upstream_addr,
+            proxy_world_addr
         );
 
         let mut tail = [0u8; 7];
@@ -4157,7 +4533,7 @@ fn rewrite_realmlist_addresses(
         rewritten_entry.push(0);
         rewritten_entry.extend_from_slice(&tail);
 
-        println!(
+        vprintln!(
             "proxy.login.realm_entry_debug name=\"{}\" icon={} lock={} flags={} upstream_addr_raw=\"{}\" rewritten_addr_raw=\"{}\" upstream_entry_hex={} rewritten_entry_hex={}",
             name,
             icon,
@@ -4195,9 +4571,11 @@ fn rewrite_realmlist_addresses(
         anyhow::bail!("realmlist payload too large");
     }
     rebuilt[0..2].copy_from_slice(&(payload_len as u16).to_le_bytes());
-    println!(
+    vprintln!(
         "proxy.login.realm_rewrite_done realms={} payload_len={} proxy_world_addr={}",
-        realms_count, payload_len, proxy_world_addr
+        realms_count,
+        payload_len,
+        proxy_world_addr
     );
 
     Ok((

@@ -16,6 +16,27 @@ use crate::player::spells::KnownSpell;
 use crate::player::{other_state::OtherPlayerState, player_state::PlayerCurrentState};
 use crate::world::npc_state::NpcCurrentState;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LootItemView {
+    pub slot: u8,
+    pub item_id: u32,
+    pub count: u32,
+    pub display_id: u32,
+    pub random_suffix: u32,
+    pub random_property_id: u32,
+    pub slot_type: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LootWindowState {
+    pub source_guid: u64,
+    pub loot_type: u8,
+    pub money: u32,
+    pub items: Vec<LootItemView>,
+    /// Optional loot error code when loot_type is LOOT_NONE (0).
+    pub error: Option<u8>,
+}
+
 // WoW 3.3.5a update field indices (AzerothCore `UpdateFields.h`).
 const OBJECT_FIELD_ENTRY: u32 = 0x0003;
 
@@ -80,6 +101,8 @@ pub struct WorldState {
     /// SMSG_COOLDOWN_EVENT, SMSG_MODIFY_COOLDOWN). It's intentionally tick-based because the agent
     /// loop is tick-driven; we can refine to ms later if needed.
     pub spell_cooldowns_until_tick: HashMap<u32, u64>,
+    /// Current loot window snapshot from server packets (if any).
+    pub loot: Option<LootWindowState>,
     pub tick: Wrapping<u64>,
 }
 
@@ -95,6 +118,7 @@ impl WorldState {
             last_attacker_guid: None,
             last_attacked_tick: None,
             spell_cooldowns_until_tick: HashMap::new(),
+            loot: None,
             tick: Wrapping(0),
         }
     }

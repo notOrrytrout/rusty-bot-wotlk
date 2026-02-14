@@ -4,8 +4,17 @@ use serde::{Deserialize, Serialize};
 pub const TOOL_CALL_START: &str = "<tool_call>";
 pub const TOOL_CALL_END: &str = "</tool_call>";
 
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolCallWire {
+    /// Schema version for the `<tool_call>` JSON object.
+    ///
+    /// If omitted by the LLM/client, we assume v1.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub name: String,
     #[serde(default)]
     pub confirm: bool,
@@ -18,6 +27,7 @@ pub enum ToolParseError {
     MissingToolCallBlock,
     MultipleToolCallBlocks,
     InvalidJson,
+    UnsupportedSchemaVersion(u32),
     UnsupportedToolName(String),
     InvalidArguments(String),
 }
@@ -28,6 +38,9 @@ impl std::fmt::Display for ToolParseError {
             ToolParseError::MissingToolCallBlock => write!(f, "missing <tool_call> block"),
             ToolParseError::MultipleToolCallBlocks => write!(f, "multiple <tool_call> blocks"),
             ToolParseError::InvalidJson => write!(f, "invalid tool call json"),
+            ToolParseError::UnsupportedSchemaVersion(v) => {
+                write!(f, "unsupported schema_version: {v}")
+            }
             ToolParseError::UnsupportedToolName(name) => {
                 write!(f, "unsupported tool name: {name}")
             }
@@ -109,6 +122,11 @@ pub struct CastArgs {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LootArgs {
+    pub guid: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ToolInvocation {
     pub call: ToolCall,
     #[serde(default)]
@@ -127,6 +145,7 @@ pub enum ToolCall {
     TargetNearestNpc(TargetNearestNpcArgs),
     Interact(InteractArgs),
     Cast(CastArgs),
+    Loot(LootArgs),
 }
 
 fn clamp_duration_ms(ms: u32) -> u32 {
@@ -180,6 +199,11 @@ impl TryFrom<ToolCallWire> for ToolCall {
     type Error = ToolParseError;
 
     fn try_from(wire: ToolCallWire) -> Result<Self, Self::Error> {
+        if wire.schema_version != 1 {
+            return Err(ToolParseError::UnsupportedSchemaVersion(
+                wire.schema_version,
+            ));
+        }
         let name = wire.name.trim().to_ascii_lowercase();
         match name.as_str() {
             "request_idle" => Ok(ToolCall::RequestIdle),
@@ -229,6 +253,11 @@ impl TryFrom<ToolCallWire> for ToolCall {
                 args.guid = validate_optional_nonzero_guid(args.guid, "cast")?;
                 Ok(ToolCall::Cast(args))
             }
+            "loot" => {
+                let mut args = parse_args::<LootArgs>(wire.arguments, "loot")?;
+                args.guid = validate_nonzero_guid(args.guid, "loot")?;
+                Ok(ToolCall::Loot(args))
+            }
             other => Err(ToolParseError::UnsupportedToolName(other.to_string())),
         }
     }
@@ -240,6 +269,7 @@ impl TryFrom<ToolCallWire> for ToolInvocation {
     fn try_from(wire: ToolCallWire) -> Result<Self, Self::Error> {
         let confirm = wire.confirm;
         let call = ToolCall::try_from(ToolCallWire {
+            schema_version: wire.schema_version,
             name: wire.name,
             confirm,
             arguments: wire.arguments,
@@ -323,6 +353,13 @@ mod tests {
         let inv = parse_tool_call(s).unwrap();
         assert!(inv.confirm);
         assert!(matches!(inv.call, ToolCall::RequestIdle));
+    }
+
+    #[test]
+    fn parse_schema_version_rejects_unknown() {
+        let s = "<tool_call>{\"schema_version\":999,\"name\":\"request_idle\",\"arguments\":{}}</tool_call>";
+        let err = parse_tool_call(s).unwrap_err();
+        assert!(format!("{err}").contains("unsupported schema_version"));
     }
 
     #[test]

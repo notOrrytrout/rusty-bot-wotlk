@@ -185,7 +185,7 @@ pub async fn tick(
                 if !cfg.enable_repair {
                     None
                 } else {
-                    let repair_instruction = "Your previous response was invalid.\nReturn exactly one <tool_call>...</tool_call> block and nothing else.\nThe JSON must be an object with keys: name, arguments (and optional confirm).\n";
+                    let repair_instruction = "Your previous response was invalid.\nReturn exactly one <tool_call>...</tool_call> block and nothing else.\nThe JSON must be an object with keys: name, arguments (and optional: confirm, schema_version=1).\n";
                     let repair_prompt = format!(
                         "{prompt_str}\n\n[REPAIR]\n{repair_instruction}\n[INVALID_OUTPUT]\n{raw}\n"
                     );
@@ -335,6 +335,7 @@ mod tests {
             players_nearby: vec![],
             chat_log: vec![],
             combat_log: vec![],
+            loot: None,
             derived: DerivedFacts::default(),
         }
     }

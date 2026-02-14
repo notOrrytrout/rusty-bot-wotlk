@@ -60,7 +60,7 @@ MVP high-level goals (first set to support end-to-end):
 - [x] Follow a moving target (player or NPC). (v0: deterministic goal step with visible target guid/entry)
 - [x] Go to NPC and interact (start simple: approach + interact). (v0: deterministic goal step with visible npc entry/guid)
 - [x] Kill a target (very crude: target + cast by slot, stop moving in combat). (v0: `kill ...` goal + `cast` uses attackswing)
-- [ ] Loot (requires new observation/state).
+- [x] Loot (requires new observation/state). (v0: observe `SMSG_LOOT_RESPONSE` + `loot {guid}` tool drives loot packets)
 
 ---
 
@@ -181,11 +181,11 @@ Acceptance checks
 - [x] LLM down/unreachable triggers emergency stop behavior and keeps loop alive.
 
 ### Release Hygiene (Later)
-- [ ] Major release: default verbose proxy/agent debug logging OFF (make it opt-in via env/config); keep current defaults during active development.
+- [x] Major release: default verbose proxy/agent debug logging OFF (make it opt-in via env/config); keep current defaults during active development.
 
 ### Deferred / Later (Not Needed For MVP Loop Stability)
-- [ ] Separate runner process (proxy stays “dumb”, runner connects over control/IPC and drives it)
-- [ ] Add `schema_version` to the `<tool_call>` JSON once we move past the demo tool set
+- [x] Separate runner process (proxy stays “dumb”, runner connects over control/IPC and drives it)
+- [x] Add `schema_version` to the `<tool_call>` JSON once we move past the demo tool set
 
 ### 5) LLM Adapter Hardening (Parsing + Guardrails)
 - [x] Strict JSON parse of LLM output into `<tool_call>` -> `ToolInvocation` (validated).
@@ -277,8 +277,8 @@ These depend on new packet support + state tracking; keep them blocked until fra
   - [x] Proxy packet injection (v0) for `cast` implemented as `CMSG_ATTACKSWING` when `guid` is provided (`crates/gateway-proxy/src/proxy.rs`)
   - [x] `cast { slot, guid? }` (v0: implemented as attackswing; real cast/use-action is later)
   - [x] stop moving when combat detected (v0: preempt continuous movement when `derived.in_combat`)
-  - [x] detect “something happened” via combat log/state deltas (v0: `derived.in_combat`)
-- [ ] Loot v0 (requires state additions; define later)
+- [x] detect “something happened” via combat log/state deltas (v0: `derived.in_combat`)
+- [x] Loot v0 (requires state additions; define later)
 
 ---
 

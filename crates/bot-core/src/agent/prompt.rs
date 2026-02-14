@@ -13,7 +13,7 @@ pub struct PromptConfig {
 impl Default for PromptConfig {
     fn default() -> Self {
         Self {
-            tool_call_contract: "Return exactly one <tool_call>...</tool_call> block and nothing else.\nInside the block, return JSON object: {\"name\":\"...\",\"arguments\":{...}} (optional: \"confirm\": true).\nDo not include markdown, code fences, or any other text.\n\nFormat:\n<tool_call>\n{\"name\":\"request_idle\",\"arguments\":{}}\n</tool_call>"
+            tool_call_contract: "Return exactly one <tool_call>...</tool_call> block and nothing else.\nInside the block, return JSON object: {\"name\":\"...\",\"arguments\":{...}} (optional: \"confirm\": true, \"schema_version\": 1).\nDo not include markdown, code fences, or any other text.\n\nFormat:\n<tool_call>\n{\"schema_version\":1,\"name\":\"request_idle\",\"arguments\":{}}\n</tool_call>"
                 .to_string(),
             tool_list: tools::tool_list_text(),
         }
@@ -34,6 +34,7 @@ pub fn build_control_prompt(
         "players_nearby": obs.players_nearby,
         "chat_log": obs.chat_log,
         "combat_log": obs.combat_log,
+        "loot": obs.loot,
         "derived": obs.derived,
         "goal": mem.goal,
         "goal_id": mem.goal_id,
@@ -82,6 +83,7 @@ mod tests {
             players_nearby: vec![],
             chat_log: vec!["hello".to_string()],
             combat_log: vec![],
+            loot: None,
             derived: DerivedFacts {
                 moving: false,
                 client_correction_seen_recently: true,

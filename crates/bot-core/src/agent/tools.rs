@@ -16,6 +16,7 @@ pub enum ToolId {
     TargetNearestNpc,
     Interact,
     Cast,
+    Loot,
 }
 
 pub trait Tool {
@@ -43,6 +44,7 @@ impl Tool for ToolId {
             ToolId::TargetNearestNpc => "target_nearest_npc",
             ToolId::Interact => "interact",
             ToolId::Cast => "cast",
+            ToolId::Loot => "loot",
         }
     }
 
@@ -64,6 +66,7 @@ impl Tool for ToolId {
             ToolId::TargetNearestNpc => "target_nearest_npc {\"entry\":123} (entry optional)",
             ToolId::Interact => "interact {\"guid\":123}",
             ToolId::Cast => "cast {\"slot\":1..12,\"guid\":123} (guid optional)",
+            ToolId::Loot => "loot {\"guid\":123}",
         }
     }
 
@@ -88,6 +91,7 @@ static TOOL_REGISTRY: &[ToolId] = &[
     ToolId::TargetNearestNpc,
     ToolId::Interact,
     ToolId::Cast,
+    ToolId::Loot,
 ];
 
 pub fn registry() -> &'static [ToolId] {
@@ -142,6 +146,7 @@ pub fn tool_id_for_call(tool: &ToolCall) -> ToolId {
         ToolCall::TargetNearestNpc(_) => ToolId::TargetNearestNpc,
         ToolCall::Interact(_) => ToolId::Interact,
         ToolCall::Cast(_) => ToolId::Cast,
+        ToolCall::Loot(_) => ToolId::Loot,
     }
 }
 
@@ -161,6 +166,7 @@ pub fn default_timeout(tool: &ToolCall) -> Duration {
         ToolCall::TargetNearestNpc(_) => Duration::from_millis(900),
         ToolCall::Interact(_) => Duration::from_millis(1200),
         ToolCall::Cast(_) => Duration::from_millis(1400),
+        ToolCall::Loot(_) => Duration::from_millis(3500),
         ToolCall::RequestEmote(_) => Duration::from_millis(1800),
         ToolCall::RequestJump => Duration::from_millis(900),
         ToolCall::RequestStop(_) => Duration::from_millis(700),
@@ -234,6 +240,9 @@ mod tests {
             }
             ToolId::Cast => {
                 "<tool_call>{\"name\":\"cast\",\"arguments\":{\"slot\":1,\"guid\":42}}</tool_call>"
+            }
+            ToolId::Loot => {
+                "<tool_call>{\"name\":\"loot\",\"arguments\":{\"guid\":42}}</tool_call>"
             }
         }
     }

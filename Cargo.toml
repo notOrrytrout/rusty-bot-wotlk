@@ -3,4 +3,5 @@ resolver = "2"
 members = [
   "crates/bot-core",
   "crates/gateway-proxy",
+  "crates/runner",
 ]

@@ -109,7 +109,19 @@ The proxy listens for a real WoW client on the configured addresses:
 - Login: `config/wow/wotlk/connection.toml` -> `[gateway.proxy].login_listen`
 - World: `config/wow/wotlk/connection.toml` -> `[gateway.proxy].world_listen`
 
-The bot logic runs inside the proxy process (in-proxy agent loop). It starts disabled by default unless `RUSTY_BOT_AGENT_ENABLED=1` is set, and can be enabled/disabled at runtime via the control port (`op=agent_enable`).
+Preferred: run the agent loop in a separate process (`rusty-bot-runner`) that talks to the proxy over the control port.
+
+Legacy (optional): the bot logic can also run inside the proxy process (in-proxy agent loop). It starts disabled by default unless `RUSTY_BOT_AGENT_ENABLED=1` is set, and can be enabled/disabled at runtime via the control port (`op=agent_enable`). To enable the in-proxy agent task, set `RUSTY_BOT_IN_PROXY_AGENT=1`.
+
+#### External Runner
+
+1) Start the proxy (and a mock or real LLM endpoint)
+
+2) In another terminal, run:
+
+```bash
+cargo run -p rusty-bot-runner
+```
 
 #### 1) Start The Proxy + Mock LLM (Tool Calls)
 

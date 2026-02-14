@@ -413,6 +413,7 @@ mod tests {
             players_nearby: vec![],
             chat_log: vec![],
             combat_log: vec![],
+            loot: None,
             derived: DerivedFacts {
                 stuck_suspected: true,
                 stuck_frames: 99,

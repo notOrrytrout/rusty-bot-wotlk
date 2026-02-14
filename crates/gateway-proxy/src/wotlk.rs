@@ -35,6 +35,17 @@ pub mod opcode {
         pub const CMSG_SET_SELECTION: u32 = 0x013D;
         pub const CMSG_ATTACKSWING: u32 = 0x0141;
         pub const CMSG_GOSSIP_HELLO: u32 = 0x017B;
+
+        // Loot.
+        // AzerothCore WotLK opcode map:
+        // - CMSG_AUTOSTORE_LOOT_ITEM = 0x108
+        // - CMSG_LOOT = 0x15D
+        // - CMSG_LOOT_MONEY = 0x15E
+        // - CMSG_LOOT_RELEASE = 0x15F
+        pub const CMSG_AUTOSTORE_LOOT_ITEM: u32 = 0x0108;
+        pub const CMSG_LOOT: u32 = 0x015D;
+        pub const CMSG_LOOT_MONEY: u32 = 0x015E;
+        pub const CMSG_LOOT_RELEASE: u32 = 0x015F;
     }
 }
 

@@ -103,8 +103,30 @@ pub struct Observation {
     pub chat_log: Vec<String>,
     #[serde(default)]
     pub combat_log: Vec<String>,
+    /// Current loot window snapshot (if any).
+    #[serde(default)]
+    pub loot: Option<LootSummary>,
     #[serde(default)]
     pub derived: DerivedFacts,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LootItemSummary {
+    pub slot: u8,
+    pub item_id: u32,
+    pub count: u32,
+    pub slot_type: u8,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct LootSummary {
+    pub source_guid: u64,
+    pub loot_type: u8,
+    pub money: u32,
+    #[serde(default)]
+    pub items: Vec<LootItemSummary>,
+    #[serde(default)]
+    pub error: Option<u8>,
 }
 
 fn dist_sq(a: &Vec3, b: &Vec3) -> f32 {
@@ -192,6 +214,22 @@ impl Observation {
             players_nearby: others,
             chat_log: world.chat_log.iter().take(10).cloned().collect(),
             combat_log: world.combat_log.iter().take(10).cloned().collect(),
+            loot: world.loot.as_ref().map(|l| LootSummary {
+                source_guid: l.source_guid,
+                loot_type: l.loot_type,
+                money: l.money,
+                items: l
+                    .items
+                    .iter()
+                    .map(|i| LootItemSummary {
+                        slot: i.slot,
+                        item_id: i.item_id,
+                        count: i.count,
+                        slot_type: i.slot_type,
+                    })
+                    .collect(),
+                error: l.error,
+            }),
             derived: DerivedFacts::default(),
         }
     }
