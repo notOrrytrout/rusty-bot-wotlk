@@ -74,6 +74,12 @@ pub struct WorldState {
     /// Best-effort "who last hit us" signal (GUID of the attacker), plus the tick when we last saw it.
     pub last_attacker_guid: Option<u64>,
     pub last_attacked_tick: Option<u64>,
+    /// Spell cooldowns: spell_id -> world tick at which we believe the cooldown expires.
+    ///
+    /// This is fed by server->client packets observed by the proxy (e.g. SMSG_SPELL_COOLDOWN,
+    /// SMSG_COOLDOWN_EVENT, SMSG_MODIFY_COOLDOWN). It's intentionally tick-based because the agent
+    /// loop is tick-driven; we can refine to ms later if needed.
+    pub spell_cooldowns_until_tick: HashMap<u32, u64>,
     pub tick: Wrapping<u64>,
 }
 
@@ -88,6 +94,7 @@ impl WorldState {
             combat_log: Vec::new(),
             last_attacker_guid: None,
             last_attacked_tick: None,
+            spell_cooldowns_until_tick: HashMap::new(),
             tick: Wrapping(0),
         }
     }
@@ -573,7 +580,7 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         let s = s.trim();
-        assert!(s.len() % 2 == 0);
+        assert!(s.len().is_multiple_of(2));
         (0..s.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())

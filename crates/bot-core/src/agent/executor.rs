@@ -85,20 +85,19 @@ impl Executor {
             stop_after,
             ..
         } = &self.state
+            && is_continuous(&current.call)
         {
-            if is_continuous(&current.call) {
-                stop_first = stop_after
-                    .clone()
-                    .or_else(|| auto_stop_after(&current.call));
-                // If we're continuous but somehow lack a stop tool, fall back to idle.
-                if stop_first.is_none() {
-                    stop_first = Some(ToolInvocation {
-                        call: ToolCall::RequestIdle,
-                        confirm: false,
-                    });
-                }
-                self.state = ExecutorState::Idle;
+            stop_first = stop_after
+                .clone()
+                .or_else(|| auto_stop_after(&current.call));
+            // If we're continuous but somehow lack a stop tool, fall back to idle.
+            if stop_first.is_none() {
+                stop_first = Some(ToolInvocation {
+                    call: ToolCall::RequestIdle,
+                    confirm: false,
+                });
             }
+            self.state = ExecutorState::Idle;
         }
 
         if matches!(self.state, ExecutorState::Backoff { .. }) {
@@ -218,9 +217,7 @@ impl Executor {
             return None;
         };
 
-        if obs.self_state.is_none() {
-            return None;
-        }
+        obs.self_state.as_ref()?;
 
         // Stuck detection: if we appear to be translating but not making progress for several frames,
         // treat the current move tool as failed so the LLM can choose a recovery action (turn, jump, etc).
@@ -337,10 +334,11 @@ impl Executor {
 
         self.state = ExecutorState::Idle;
 
-        if result.status == ToolStatus::Ok && is_continuous(&tool.call) {
-            if let Some(stop_tool) = stop_after {
-                self.queue.push_front(stop_tool);
-            }
+        if result.status == ToolStatus::Ok
+            && is_continuous(&tool.call)
+            && let Some(stop_tool) = stop_after
+        {
+            self.queue.push_front(stop_tool);
         }
 
         Some((tool, result))

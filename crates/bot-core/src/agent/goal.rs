@@ -43,7 +43,7 @@ impl GoalPlan {
             .unwrap_or(1)
             .clamp(1, 12) as u8;
 
-        let (verb, rest) = t.split_once(' ').unwrap_or_else(|| (t.as_str(), ""));
+        let (verb, rest) = t.split_once(' ').unwrap_or((t.as_str(), ""));
 
         let guid = extract_u64_kv(&t, "guid")
             .or_else(|| extract_u64_kv(&t, "target_guid"))
@@ -246,22 +246,20 @@ impl GoalPlan {
                 // Not "nearest npc in world", but nearest *visible* matching entry.
                 obs.npcs_nearby
                     .iter()
-                    .filter(|n| n.entry == Some(entry))
-                    .next()
+                    .find(|n| n.entry == Some(entry))
                     .map(|e| (e.guid, e.pos))
             }
             GoalKind::KillGuid { guid, .. } => find_guid(obs, guid).map(|e| (e.guid, e.pos)),
             GoalKind::KillNpcEntry { entry, .. } => obs
                 .npcs_nearby
                 .iter()
-                .filter(|n| n.entry == Some(entry))
-                .next()
+                .find(|n| n.entry == Some(entry))
                 .map(|e| (e.guid, e.pos)),
         }
     }
 }
 
-fn find_guid<'a>(obs: &'a Observation, guid: u64) -> Option<&'a EntitySummary> {
+fn find_guid(obs: &Observation, guid: u64) -> Option<&EntitySummary> {
     obs.npcs_nearby
         .iter()
         .find(|e| e.guid == guid)

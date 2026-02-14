@@ -47,6 +47,19 @@ pub struct DerivedFacts {
     /// Best-effort "who is attacking us" guid, if known.
     #[serde(default)]
     pub attacker_guid: Option<u64>,
+    /// Spell ids currently on cooldown (capped) based on server observations.
+    /// This is a prompt/debug aid; strategy code should consult cooldown maps directly when possible.
+    #[serde(default)]
+    pub spells_on_cooldown: Vec<u32>,
+    /// Cooldowns with expiry ticks (capped), used by deterministic strategy selection.
+    #[serde(default)]
+    pub spell_cooldowns: Vec<SpellCooldownSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SpellCooldownSummary {
+    pub spell_id: u32,
+    pub until_tick: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -177,8 +190,8 @@ impl Observation {
             self_state,
             npcs_nearby: npcs,
             players_nearby: others,
-            chat_log: world.chat_log.iter().cloned().take(10).collect(),
-            combat_log: world.combat_log.iter().cloned().take(10).collect(),
+            chat_log: world.chat_log.iter().take(10).cloned().collect(),
+            combat_log: world.combat_log.iter().take(10).cloned().collect(),
             derived: DerivedFacts::default(),
         }
     }
@@ -220,12 +233,38 @@ impl ObservationBuilder {
             .unwrap_or(false);
 
         // If we have a "last attacker" signal, treat that as combat too (more direct than log growth).
-        if let (Some(att), Some(tick)) = (world.last_attacker_guid, world.last_attacked_tick) {
-            if world.tick.0.saturating_sub(tick) <= COMBAT_RECENT_TICKS {
-                obs.derived.attacker_guid = Some(att);
-                obs.derived.in_combat = true;
-            }
+        if let (Some(att), Some(tick)) = (world.last_attacker_guid, world.last_attacked_tick)
+            && world.tick.0.saturating_sub(tick) <= COMBAT_RECENT_TICKS
+        {
+            obs.derived.attacker_guid = Some(att);
+            obs.derived.in_combat = true;
         }
+
+        // Cooldown snapshot: list a capped set of spells currently on cooldown and their expiry ticks.
+        let mut cds: Vec<SpellCooldownSummary> = world
+            .spell_cooldowns_until_tick
+            .iter()
+            .filter_map(|(spell_id, until)| {
+                if world.tick.0 < *until {
+                    Some(SpellCooldownSummary {
+                        spell_id: *spell_id,
+                        until_tick: *until,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        cds.sort_by_key(|c| c.spell_id);
+        cds.truncate(64);
+        obs.derived.spell_cooldowns = cds;
+        obs.derived.spells_on_cooldown = obs
+            .derived
+            .spell_cooldowns
+            .iter()
+            .map(|c| c.spell_id)
+            .take(32)
+            .collect();
 
         if let Some(self_state) = obs.self_state.as_ref() {
             const MOVE_MASK: u32 =

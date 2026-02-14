@@ -14,6 +14,7 @@ pub mod r#loop;
 pub mod memory;
 pub mod observation;
 pub mod prompt;
+pub mod strategy;
 pub mod tools;
 pub mod wire;
 

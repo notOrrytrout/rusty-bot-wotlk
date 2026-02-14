@@ -149,14 +149,12 @@ impl AgentMemory {
 
         // Goal completion: if we're running a goto+interact goal and we successfully interacted,
         // mark the goal completed.
-        if status == ToolStatus::Ok {
-            if let Some(plan) = self.goal_plan.as_ref() {
-                if plan.wants_interact()
-                    && matches!(tool_for_goal.call, super::ToolCall::Interact(_))
-                {
-                    self.complete_goal("interacted");
-                }
-            }
+        if status == ToolStatus::Ok
+            && let Some(plan) = self.goal_plan.as_ref()
+            && plan.wants_interact()
+            && matches!(tool_for_goal.call, super::ToolCall::Interact(_))
+        {
+            self.complete_goal("interacted");
         }
     }
 
@@ -201,11 +199,9 @@ impl AgentMemory {
 
                 if let Some(t) = target {
                     self.kill_missing_target_frames = 0;
-                    if let Some((hp, _max)) = t.hp {
-                        if hp == 0 {
-                            self.complete_goal("target_dead");
-                            return;
-                        }
+                    if let Some((hp, _max)) = t.hp && hp == 0 {
+                        self.complete_goal("target_dead");
+                        return;
                     }
                 } else {
                     // If we haven't selected a target yet, don't penalize.

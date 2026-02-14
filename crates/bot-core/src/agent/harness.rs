@@ -96,49 +96,18 @@ pub async fn tick(
         }
     }
 
-    // Combat defense: if something is attacking us and we're not already in an explicit kill goal,
-    // opportunistically hit back so the bot doesn't stand there taking damage.
-    if agent.executor.is_idle()
-        && agent.executor.queued_len() == 0
-        && obs.derived.in_combat
-        && obs.derived.attacker_guid.is_some()
-    {
-        let kill_goal_active = agent.memory.goal_state == Some(super::memory::GoalState::Active)
-            && agent
-                .memory
-                .goal_plan
-                .as_ref()
-                .map(|p| {
-                    matches!(
-                        p.kind,
-                        super::goal::GoalKind::KillGuid { .. }
-                            | super::goal::GoalKind::KillNpcEntry { .. }
-                    )
-                })
-                .unwrap_or(false);
-
-        if !kill_goal_active {
-            let attacker_guid = obs.derived.attacker_guid.unwrap_or(0);
-            if attacker_guid != 0 {
-                let tool = super::ToolInvocation {
-                    call: super::ToolCall::Cast(super::wire::CastArgs {
-                        slot: 1,
-                        guid: Some(attacker_guid),
-                    }),
-                    confirm: false,
-                };
-                agent.executor.offer_llm_tool(tool.clone());
-                return Ok(HarnessOutcome::Offered { tool });
-            }
-        }
-    }
-
     // Completion checks.
     if let Some((tool, result)) = agent.executor.tick_observation(&obs) {
+        agent
+            .strategy_engine
+            .note_tool_result(obs.tick, &tool, &result);
         agent.memory.record(tool.clone(), result.clone());
         return Ok(HarnessOutcome::Completed { tool, result });
     }
     if let Some((tool, result)) = agent.executor.tick_timeout(now) {
+        agent
+            .strategy_engine
+            .note_tool_result(obs.tick, &tool, &result);
         agent.memory.record(tool.clone(), result.clone());
         return Ok(HarnessOutcome::Completed { tool, result });
     }
@@ -155,6 +124,9 @@ pub async fn tick(
         }
 
         if let Some((done_tool, done_res)) = agent.executor.complete(now, res) {
+            agent
+                .strategy_engine
+                .note_tool_result(obs.tick, &done_tool, &done_res);
             agent.memory.record(done_tool.clone(), done_res.clone());
             return Ok(HarnessOutcome::Completed {
                 tool: done_tool,
@@ -165,17 +137,27 @@ pub async fn tick(
         return Ok(HarnessOutcome::Observed);
     }
 
+    // Strategy driver: if the executor is idle and has no queued work, allow deterministic
+    // strategies (combat behaviors, etc) to offer a tool before goal stepping or LLM polling.
+    if agent.executor.is_idle()
+        && agent.executor.queued_len() == 0
+        && let Some(cand) = agent.strategy_engine.next_action(&obs, &agent.memory)
+    {
+        let tool = cand.tool;
+        agent.executor.offer_llm_tool(tool.clone());
+        return Ok(HarnessOutcome::Offered { tool });
+    }
+
     // Goal driver: if the executor is idle and has no queued work, allow a deterministic goal step
     // to offer the next tool before polling the LLM.
-    if agent.executor.is_idle() && agent.executor.queued_len() == 0 {
-        if agent.memory.goal_state == Some(super::memory::GoalState::Active) {
-            if let Some(plan) = agent.memory.goal_plan.as_mut() {
-                if let Some(tool) = plan.step(&obs) {
-                    agent.executor.offer_llm_tool(tool.clone());
-                    return Ok(HarnessOutcome::Offered { tool });
-                }
-            }
-        }
+    if agent.executor.is_idle()
+        && agent.executor.queued_len() == 0
+        && agent.memory.goal_state == Some(super::memory::GoalState::Active)
+        && let Some(plan) = agent.memory.goal_plan.as_mut()
+        && let Some(tool) = plan.step(&obs)
+    {
+        agent.executor.offer_llm_tool(tool.clone());
+        return Ok(HarnessOutcome::Offered { tool });
     }
 
     // If idle and nothing queued, ask the LLM for the next tool call.
@@ -288,13 +270,11 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + 'a>> {
             Box::pin(async move {
                 self.executed.lock().unwrap().push(tool);
-                let next = self
-                    .tool_results
+                self.tool_results
                     .lock()
                     .unwrap()
                     .pop_front()
-                    .ok_or_else(|| anyhow::anyhow!("no tool result queued"))?;
-                next
+                    .ok_or_else(|| anyhow::anyhow!("no tool result queued"))?
             })
         }
     }

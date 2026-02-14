@@ -210,6 +210,9 @@ Acceptance checks
 - [x] Add stuck detection v0:
   - [x] Count repeated move attempts with negligible position delta (`ObservationBuilder.stuck_frames`)
   - [x] Surface `stuck_suspected=true` and a reason (`Observation.derived.stuck_reason`)
+- [x] Track combat attacker GUID and spell cooldowns from server packets:
+  - [x] `SMSG_ATTACKERSTATEUPDATE` -> `derived.attacker_guid` (best-effort)
+  - [x] `SMSG_SPELL_COOLDOWN` / `SMSG_COOLDOWN_EVENT` / `SMSG_MODIFY_COOLDOWN` -> tick-based spell cooldown map (best-effort)
 
 ### 7) Testing Harness (So We Can Move Fast Without Regressions)
 - [x] Unit tests in `rusty-bot-core`:
@@ -224,6 +227,7 @@ Acceptance checks
 Acceptance checks
 - [x] `cargo test` workspace passes without a server or client running.
 - [x] A test proves: invalid LLM output => zero injections executed. (`crates/bot-core/src/agent/harness.rs`)
+- [x] Cooldown packets and attacker state parsing have unit tests in `gateway-proxy`.
 
 ### 8) Goal System (High-Level Commands)
 - [x] Add goal input:

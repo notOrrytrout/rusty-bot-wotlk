@@ -2,6 +2,7 @@ use super::executor::Executor;
 use super::memory::AgentMemory;
 use super::observation::{Observation, ObservationBuilder};
 use super::prompt::{PromptConfig, build_control_prompt};
+use super::strategy::StrategyEngine;
 use super::{ToolInvocation, parse_tool_call};
 
 #[derive(Debug)]
@@ -11,6 +12,7 @@ pub struct AgentLoop {
     pub memory: AgentMemory,
     pub executor: Executor,
     pub observation_builder: ObservationBuilder,
+    pub strategy_engine: StrategyEngine,
 }
 
 impl AgentLoop {
@@ -21,6 +23,7 @@ impl AgentLoop {
             memory: AgentMemory::default(),
             executor: Executor::default(),
             observation_builder: ObservationBuilder::default(),
+            strategy_engine: StrategyEngine::default(),
         }
     }
 

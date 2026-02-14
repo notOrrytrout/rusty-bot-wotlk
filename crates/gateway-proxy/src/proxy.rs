@@ -215,10 +215,8 @@ fn route_for_opcode(opcode: u32) -> InjectRoute {
         return InjectRoute::UpstreamOnly;
     }
 
-    if let Ok(op_u16) = u16::try_from(opcode) {
-        if is_world_move_opcode(op_u16) {
-            return InjectRoute::UpstreamOnly;
-        }
+    if let Ok(op_u16) = u16::try_from(opcode) && is_world_move_opcode(op_u16) {
+        return InjectRoute::UpstreamOnly;
     }
 
     // Default: injected packets should go upstream only. Echoing to the client is unsafe.
@@ -720,6 +718,7 @@ async fn read_world_packets(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_client_world_packets(
     mut reader: OwnedReadHalf,
     mut decryptor: Encryptor,
@@ -764,11 +763,9 @@ async fn read_client_world_packets(
         // Human override: only treat *movement* packets as "human is actively driving".
         // The WoW client sends many other client->server packets periodically (time sync, keepalives,
         // etc). Counting all packets would keep the override permanently active and block the agent.
-        if let Ok(op_u16) = u16::try_from(packet.opcode) {
-            if is_world_move_opcode(op_u16) {
-                let mut state = injection_guard.lock().await;
-                state.last_human_action_at = Some(Instant::now());
-            }
+        if let Ok(op_u16) = u16::try_from(packet.opcode) && is_world_move_opcode(op_u16) {
+            let mut state = injection_guard.lock().await;
+            state.last_human_action_at = Some(Instant::now());
         }
 
         // Capture self GUID as early as possible (before any movement templates exist).
@@ -777,14 +774,13 @@ async fn read_client_world_packets(
 
         record_client_movement_observation(&packet, &injection_guard, &world_state).await;
 
-        if suppress_client_movement {
-            if let Ok(op_u16) = u16::try_from(packet.opcode) {
-                if is_world_move_opcode(op_u16) {
-                    // Let the bot injector be the sole writer of movement to the server.
-                    // We still record movement observations above so the injector can reuse templates.
-                    continue;
-                }
-            }
+        if suppress_client_movement
+            && let Ok(op_u16) = u16::try_from(packet.opcode)
+            && is_world_move_opcode(op_u16)
+        {
+            // Let the bot injector be the sole writer of movement to the server.
+            // We still record movement observations above so the injector can reuse templates.
+            continue;
         }
 
         if tx.send(packet).await.is_err() {
@@ -1188,13 +1184,11 @@ fn parse_opcode_u16(opcode: &str) -> anyhow::Result<u16> {
         .strip_prefix("0x")
         .or_else(|| opcode.strip_prefix("0X"))
     {
-        return Ok(
-            u16::from_str_radix(hex, 16).with_context(|| format!("invalid opcode hex {opcode}"))?
-        );
+        return u16::from_str_radix(hex, 16).with_context(|| format!("invalid opcode hex {opcode}"));
     }
-    Ok(opcode
+    opcode
         .parse::<u16>()
-        .with_context(|| format!("invalid opcode {opcode}"))?)
+        .with_context(|| format!("invalid opcode {opcode}"))
 }
 
 fn parse_control_input_line(line: &str) -> anyhow::Result<ControlInput> {
@@ -1203,15 +1197,17 @@ fn parse_control_input_line(line: &str) -> anyhow::Result<ControlInput> {
         let mut v: serde_json::Value =
             serde_json::from_str(trimmed).with_context(|| "invalid json control request")?;
 
-        let version = v.get("version").and_then(|v| v.as_u64()).map(|v| v as u32);
-        if let Some(version) = version {
-            if version != CONTROL_PROTOCOL_VERSION {
-                anyhow::bail!(
-                    "unsupported control protocol version: {} (expected {})",
-                    version,
-                    CONTROL_PROTOCOL_VERSION
-                );
-            }
+        if let Some(version) = v
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            && version != CONTROL_PROTOCOL_VERSION
+        {
+            anyhow::bail!(
+                "unsupported control protocol version: {} (expected {})",
+                version,
+                CONTROL_PROTOCOL_VERSION
+            );
         }
 
         if let serde_json::Value::Object(obj) = &mut v {
@@ -1687,6 +1683,155 @@ mod injected_movement_observation_tests {
 }
 
 #[cfg(test)]
+mod attackerstateupdate_tests {
+    use super::*;
+    use binrw::{BinWrite, Endian};
+
+    #[test]
+    fn attackerstateupdate_parser_reads_hit_info_and_packed_guids() {
+        let hit_info = 0xAABBCCDDu32;
+        let attacker = 0x0102030405060708u64;
+        let target = 0x1112131415161718u64;
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&hit_info.to_le_bytes());
+        {
+            let pos = body.len() as u64;
+            let mut cur = Cursor::new(&mut body);
+            cur.set_position(pos);
+            PackedGuid(attacker)
+                .write_options(&mut cur, Endian::Little, ())
+                .expect("write attacker guid");
+            PackedGuid(target)
+                .write_options(&mut cur, Endian::Little, ())
+                .expect("write target guid");
+        }
+
+        let (parsed_hit, parsed_attacker, parsed_target) =
+            try_parse_smsg_attackerstateupdate(&body).expect("parse");
+        assert_eq!(parsed_hit, hit_info);
+        assert_eq!(parsed_attacker, attacker);
+        assert_eq!(parsed_target, target);
+    }
+
+    #[tokio::test]
+    async fn attackerstateupdate_sets_last_attacker_when_target_is_self() {
+        let attacker = 0x0102030405060708u64;
+        let self_guid = 0x1112131415161718u64;
+        let hit_info = 0xDEADBEEFu32;
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&hit_info.to_le_bytes());
+        {
+            let pos = body.len() as u64;
+            let mut cur = Cursor::new(&mut body);
+            cur.set_position(pos);
+            PackedGuid(attacker)
+                .write_options(&mut cur, Endian::Little, ())
+                .expect("write attacker guid");
+            PackedGuid(self_guid)
+                .write_options(&mut cur, Endian::Little, ())
+                .expect("write target guid");
+        }
+
+        let world_state = Arc::new(Mutex::new(WorldState::new()));
+        {
+            let mut ws = world_state.lock().await;
+            ws.self_guid = Some(self_guid);
+        }
+
+        let pkt = WorldPacket {
+            opcode: 0x014Au32, // SMSG_ATTACKERSTATEUPDATE
+            body,
+        };
+        record_server_world_observation(&pkt, &world_state).await;
+
+        let ws = world_state.lock().await;
+        assert_eq!(ws.last_attacker_guid, Some(attacker));
+        assert_eq!(ws.last_attacked_tick, Some(0));
+        assert_eq!(ws.tick.0, 1);
+        assert!(
+            ws.combat_log
+                .iter()
+                .any(|l| l.contains("SMSG_ATTACKERSTATEUPDATE attacker=")),
+            "expected a combat log entry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cooldown_packet_tests {
+    use super::*;
+
+    #[test]
+    fn parses_smsg_spell_cooldown_pairs() {
+        let guid = 0x0102030405060708u64;
+        let flags = 0x01u8;
+        let spell1 = (116u32, 1500u32);
+        let spell2 = (133u32, 0u32);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&guid.to_le_bytes());
+        body.push(flags);
+        body.extend_from_slice(&spell1.0.to_le_bytes());
+        body.extend_from_slice(&spell1.1.to_le_bytes());
+        body.extend_from_slice(&spell2.0.to_le_bytes());
+        body.extend_from_slice(&spell2.1.to_le_bytes());
+
+        let pkt = try_parse_smsg_spell_cooldown(&body).expect("parse");
+        assert_eq!(pkt.guid, guid);
+        assert_eq!(pkt.flags, flags);
+        assert_eq!(
+            pkt.cooldowns,
+            vec![
+                SpellCooldownEntry {
+                    spell_id: spell1.0,
+                    cooldown_ms: spell1.1
+                },
+                SpellCooldownEntry {
+                    spell_id: spell2.0,
+                    cooldown_ms: spell2.1
+                }
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn spell_cooldown_updates_world_state_for_self() {
+        let self_guid = 0x0102030405060708u64;
+        let spell_id = 116u32;
+        let cooldown_ms = 1500u32;
+
+        let mut ws = WorldState::new();
+        ws.self_guid = Some(self_guid);
+        let world_state = Arc::new(Mutex::new(ws));
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&self_guid.to_le_bytes());
+        body.push(0x01); // flags
+        body.extend_from_slice(&spell_id.to_le_bytes());
+        body.extend_from_slice(&cooldown_ms.to_le_bytes());
+
+        let pkt = WorldPacket {
+            opcode: 0x0134u32, // SMSG_SPELL_COOLDOWN
+            body,
+        };
+
+        record_server_world_observation(&pkt, &world_state).await;
+        let ws = world_state.lock().await;
+        let until = ws
+            .spell_cooldowns_until_tick
+            .get(&spell_id)
+            .copied()
+            .unwrap_or(0);
+        assert!(
+            until > 0,
+            "expected cooldown to be recorded (tick-based), got {until}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod agent_movement_fallback_tests {
     use super::*;
 
@@ -1768,7 +1913,11 @@ mod agent_movement_fallback_tests {
         // Verify local position advanced on +X (orientation 0.0 => cos=1, sin=0).
         let ws = world_state.lock().await;
         let me = ws.players.get(&1).unwrap();
-        assert!(me.position.x > 0.0, "expected x to advance, got {}", me.position.x);
+        assert!(
+            me.position.x > 0.0,
+            "expected x to advance, got {}",
+            me.position.x
+        );
     }
 }
 
@@ -1845,17 +1994,16 @@ async fn record_client_movement_observation(
             apply_movement_observation_to_world(&mut ws, guid.0, &movement_info);
         }
 
-        if let Some(demo_packet) = state.last_demo_packet.as_ref() {
-            if let Ok((demo_guid, demo_mi)) = try_parse_movement_payload(&demo_packet.body) {
-                if demo_guid == guid {
-                    let dx = movement_info.location.point.x - demo_mi.location.point.x;
-                    let dy = movement_info.location.point.y - demo_mi.location.point.y;
-                    let dz = movement_info.location.point.z - demo_mi.location.point.z;
-                    let dist_sq = dx * dx + dy * dy + dz * dz;
-                    if dist_sq > 0.25 {
-                        state.last_client_correction_at = Some(Instant::now());
-                    }
-                }
+        if let Some(demo_packet) = state.last_demo_packet.as_ref()
+            && let Ok((demo_guid, demo_mi)) = try_parse_movement_payload(&demo_packet.body)
+            && demo_guid == guid
+        {
+            let dx = movement_info.location.point.x - demo_mi.location.point.x;
+            let dy = movement_info.location.point.y - demo_mi.location.point.y;
+            let dz = movement_info.location.point.z - demo_mi.location.point.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            if dist_sq > 0.25 {
+                state.last_client_correction_at = Some(Instant::now());
             }
         }
         state.last_client_move_time = Some(movement_info.time);
@@ -1883,6 +2031,9 @@ async fn record_server_world_observation(
     const SMSG_UPDATE_OBJECT: u16 = 0x00A9;
     const SMSG_MESSAGECHAT: u16 = 0x0096;
     const SMSG_ATTACKERSTATEUPDATE: u16 = 0x014A;
+    const SMSG_SPELL_COOLDOWN: u16 = 0x0134;
+    const SMSG_COOLDOWN_EVENT: u16 = 0x0135;
+    const SMSG_MODIFY_COOLDOWN: u16 = 0x0491;
 
     let Ok(opcode) = u16::try_from(packet.opcode) else {
         return;
@@ -1929,6 +2080,80 @@ async fn record_server_world_observation(
                     "SMSG_ATTACKERSTATEUPDATE unparseable len={}",
                     packet.body.len()
                 ));
+            }
+        }
+        SMSG_SPELL_COOLDOWN => {
+            // Layout (AzerothCore WotLK): guid(u64), flags(u8), then repeating (spell_id u32, cooldown_ms u32).
+            // cooldown_ms may be 0 (e.g. just starting GCD). We still record it.
+            match try_parse_smsg_spell_cooldown(&packet.body) {
+                Ok(pkt) => {
+                    ws.add_combat_message(format!(
+                        "SMSG_SPELL_COOLDOWN guid={} flags=0x{:02x} count={}",
+                        pkt.guid,
+                        pkt.flags,
+                        pkt.cooldowns.len()
+                    ));
+                    // If this is for us, track cooldown ends in ticks (approx).
+                    if ws.self_guid == Some(pkt.guid) {
+                        // Agent tick interval is ~350ms; approximate ms->ticks.
+                        let ticks_per_sec = 1000.0 / 350.0;
+                        for cd in pkt.cooldowns {
+                            let add_ticks =
+                                ((cd.cooldown_ms as f32) * ticks_per_sec / 1000.0).ceil() as u64;
+                            let until = ws.tick.0.saturating_add(add_ticks);
+                            ws.spell_cooldowns_until_tick.insert(cd.spell_id, until);
+                        }
+                    }
+                }
+                Err(_) => {
+                    ws.add_combat_message(format!(
+                        "SMSG_SPELL_COOLDOWN unparseable len={}",
+                        packet.body.len()
+                    ));
+                }
+            }
+        }
+        SMSG_COOLDOWN_EVENT => {
+            // Layout: spell_id(u32), guid(u64).
+            if let Ok((spell_id, guid)) = try_parse_smsg_cooldown_event(&packet.body) {
+                ws.add_combat_message(format!(
+                    "SMSG_COOLDOWN_EVENT spell_id={} guid={}",
+                    spell_id, guid
+                ));
+                if ws.self_guid == Some(guid) {
+                    // We don't know the duration from this packet; treat it as "was used" by
+                    // setting a short throttle (GCD-ish). Real durations come from SMSG_SPELL_COOLDOWN.
+                    let until = ws.tick.0.saturating_add(5);
+                    ws.spell_cooldowns_until_tick
+                        .entry(spell_id)
+                        .and_modify(|t| *t = (*t).max(until))
+                        .or_insert(until);
+                }
+            }
+        }
+        SMSG_MODIFY_COOLDOWN => {
+            // Layout: spell_id(u32), guid(u64), delta_ms(i32). Delta can be negative.
+            if let Ok((spell_id, guid, delta_ms)) = try_parse_smsg_modify_cooldown(&packet.body) {
+                ws.add_combat_message(format!(
+                    "SMSG_MODIFY_COOLDOWN spell_id={} guid={} delta_ms={}",
+                    spell_id, guid, delta_ms
+                ));
+                if ws.self_guid == Some(guid) {
+                    // Approximate delta_ms into ticks.
+                    let ticks_per_sec = 1000.0 / 350.0;
+                    let delta_ticks =
+                        ((delta_ms.abs() as f32) * ticks_per_sec / 1000.0).ceil() as u64;
+                    let now_tick = ws.tick.0;
+                    let entry = ws
+                        .spell_cooldowns_until_tick
+                        .entry(spell_id)
+                        .or_insert(now_tick);
+                    if delta_ms >= 0 {
+                        *entry = entry.saturating_add(delta_ticks);
+                    } else {
+                        *entry = entry.saturating_sub(delta_ticks);
+                    }
+                }
             }
         }
         _ => {}
@@ -2198,10 +2423,8 @@ impl ProxyAgentApi {
         let self_pos = ws.players.get(&self_guid).map(|p| p.position.clone())?;
         let mut best: Option<(u64, f32)> = None;
         for npc in ws.npcs.values() {
-            if let Some(entry) = entry {
-                if npc.entry != entry {
-                    continue;
-                }
+            if let Some(entry) = entry && npc.entry != entry {
+                continue;
             }
             let dx = npc.position.x - self_pos.x;
             let dy = npc.position.y - self_pos.y;
@@ -2436,29 +2659,28 @@ impl AgentGameApi for ProxyAgentApi {
                 // If the user never moved (or movement templates are otherwise unavailable),
                 // fall back to constructing a minimal, AzerothCore-compatible movement payload
                 // from our current WorldState snapshot.
-                if matches!(outcome, InjectCommandOutcome::MissingTemplate) {
-                    if let Some(pkt) = prepare_synthetic_movement_packet(
+                if matches!(outcome, InjectCommandOutcome::MissingTemplate)
+                    && let Some(pkt) = prepare_synthetic_movement_packet(
                         &cmd,
                         &self.injection_guard,
                         &self.world_state,
                     )
                     .await
-                    {
-                        let opcode = pkt.opcode;
-                        let body_len = pkt.body.len();
-                        if let Some(pkt) = injector.apply_guard(pkt).await {
-                            match injector.send(pkt).await {
-                                Ok(()) => {
-                                    outcome = InjectCommandOutcome::Injected { opcode, body_len };
-                                }
-                                Err(err) if format!("{err:#}").contains("rate_limited") => {
-                                    outcome = InjectCommandOutcome::RateLimited;
-                                }
-                                Err(err) => return Err(err),
+                {
+                    let opcode = pkt.opcode;
+                    let body_len = pkt.body.len();
+                    if let Some(pkt) = injector.apply_guard(pkt).await {
+                        match injector.send(pkt).await {
+                            Ok(()) => {
+                                outcome = InjectCommandOutcome::Injected { opcode, body_len };
                             }
-                        } else {
-                            outcome = InjectCommandOutcome::Suppressed;
+                            Err(err) if format!("{err:#}").contains("rate_limited") => {
+                                outcome = InjectCommandOutcome::RateLimited;
+                            }
+                            Err(err) => return Err(err),
                         }
+                    } else {
+                        outcome = InjectCommandOutcome::Suppressed;
                     }
                 }
 
@@ -2470,11 +2692,9 @@ impl AgentGameApi for ProxyAgentApi {
                         if let Some(pkt) = {
                             let g = self.injection_guard.lock().await;
                             g.last_demo_packet.clone()
-                        } {
-                            if let Ok((guid, mi)) = try_parse_movement_payload(&pkt.body) {
-                                let mut ws = self.world_state.lock().await;
-                                apply_movement_observation_to_world(&mut ws, guid.0, &mi);
-                            }
+                        } && let Ok((guid, mi)) = try_parse_movement_payload(&pkt.body) {
+                            let mut ws = self.world_state.lock().await;
+                            apply_movement_observation_to_world(&mut ws, guid.0, &mi);
                         }
                     }
                     InjectCommandOutcome::Suppressed => {
@@ -2604,17 +2824,15 @@ fn build_ollama_generate_payload(
         "stream": false,
     });
 
-    if let Some(keep_alive) = keep_alive {
-        if let Some(obj) = v.as_object_mut() {
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(keep_alive) = keep_alive {
             obj.insert(
                 "keep_alive".to_string(),
                 serde_json::Value::String(keep_alive.to_string()),
             );
         }
-    }
 
-    if let Some(num_ctx) = num_ctx {
-        if let Some(obj) = v.as_object_mut() {
+        if let Some(num_ctx) = num_ctx {
             obj.insert(
                 "options".to_string(),
                 serde_json::json!({
@@ -2793,10 +3011,8 @@ async fn run_agent_llm_injector(
                     continue;
                 }
 
-                if let Some(until) = llm_backoff_until {
-                    if Instant::now() < until {
-                        continue;
-                    }
+                if let Some(until) = llm_backoff_until && Instant::now() < until {
+                    continue;
                 }
 
                 let prompt_suffix = if use_vision {
@@ -3004,7 +3220,7 @@ fn build_cmsg_text_emote(text_emote: u32, emote_num: u32, target_guid: u64) -> W
     body.extend_from_slice(&emote_num.to_le_bytes());
     body.extend_from_slice(&target_guid.to_le_bytes());
     WorldPacket {
-        opcode: Opcode::CMSG_TEXT_EMOTE as u32,
+        opcode: Opcode::CMSG_TEXT_EMOTE,
         body,
     }
 }
@@ -3490,16 +3706,15 @@ async fn apply_injection_guard(
         return None;
     }
 
-    if let Some(base_time) = state.last_client_move_time {
-        if let Ok((guid, mut movement_info)) = try_parse_movement_payload(&packet.body) {
-            let desired = base_time.wrapping_add(50);
-            if movement_info.time.wrapping_sub(desired) > (u32::MAX / 2)
-                || movement_info.time < desired
-            {
-                movement_info.time = desired;
-                if let Ok(body) = pack_movement_payload(guid, &movement_info) {
-                    packet.body = body;
-                }
+    if let Some(base_time) = state.last_client_move_time
+        && let Ok((guid, mut movement_info)) = try_parse_movement_payload(&packet.body)
+    {
+        let desired = base_time.wrapping_add(50);
+        if movement_info.time.wrapping_sub(desired) > (u32::MAX / 2) || movement_info.time < desired
+        {
+            movement_info.time = desired;
+            if let Ok(body) = pack_movement_payload(guid, &movement_info) {
+                packet.body = body;
             }
         }
     }
@@ -3575,6 +3790,54 @@ fn try_parse_smsg_attackerstateupdate(body: &[u8]) -> anyhow::Result<(u32, u64, 
     let attacker = PackedGuid::read_options(&mut cur, Endian::Little, ())?.0;
     let target = PackedGuid::read_options(&mut cur, Endian::Little, ())?.0;
     Ok((hit_info, attacker, target))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpellCooldownEntry {
+    spell_id: u32,
+    cooldown_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpellCooldownPacket {
+    guid: u64,
+    flags: u8,
+    cooldowns: Vec<SpellCooldownEntry>,
+}
+
+fn try_parse_smsg_spell_cooldown(body: &[u8]) -> anyhow::Result<SpellCooldownPacket> {
+    let mut cur = Cursor::new(body);
+    let guid = ReadBytesExt::read_u64::<LittleEndian>(&mut cur)?;
+    let flags = ReadBytesExt::read_u8(&mut cur)?;
+    let mut cooldowns = Vec::new();
+    while (cur.position() as usize) + 8 <= body.len() {
+        let spell_id = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        let cooldown_ms = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+        cooldowns.push(SpellCooldownEntry {
+            spell_id,
+            cooldown_ms,
+        });
+    }
+    Ok(SpellCooldownPacket {
+        guid,
+        flags,
+        cooldowns,
+    })
+}
+
+fn try_parse_smsg_cooldown_event(body: &[u8]) -> anyhow::Result<(u32, u64)> {
+    let mut cur = Cursor::new(body);
+    let spell_id = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+    let guid = ReadBytesExt::read_u64::<LittleEndian>(&mut cur)?;
+    Ok((spell_id, guid))
+}
+
+fn try_parse_smsg_modify_cooldown(body: &[u8]) -> anyhow::Result<(u32, u64, i32)> {
+    let mut cur = Cursor::new(body);
+    let spell_id = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+    let guid = ReadBytesExt::read_u64::<LittleEndian>(&mut cur)?;
+    let delta_ms = ReadBytesExt::read_i32::<LittleEndian>(&mut cur)?;
+    Ok((spell_id, guid, delta_ms))
 }
 
 fn pack_movement_payload(
