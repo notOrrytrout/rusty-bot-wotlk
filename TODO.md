@@ -59,7 +59,7 @@ Guiding principle: the LLM chooses *high-level* tool calls; Rust code provides r
 MVP high-level goals (first set to support end-to-end):
 - [x] Follow a moving target (player or NPC). (v0: deterministic goal step with visible target guid/entry)
 - [x] Go to NPC and interact (start simple: approach + interact). (v0: deterministic goal step with visible npc entry/guid)
-- [ ] Kill a target (very crude: target + cast by slot, stop moving in combat).
+- [x] Kill a target (very crude: target + cast by slot, stop moving in combat). (v0: `kill ...` goal + `cast` uses attackswing)
 - [ ] Loot (requires new observation/state).
 
 ---
