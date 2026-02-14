@@ -141,31 +141,45 @@ impl LlmClient for RunnerLlm {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let control_addr = std::env::var("RUSTY_BOT_PROXY_CONTROL_ADDR")
+    // Defaults from environment variables.
+    let mut control_addr = std::env::var("RUSTY_BOT_PROXY_CONTROL_ADDR")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "127.0.0.1:7878".to_string());
 
-    let endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
+    let mut endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "http://127.0.0.1:11435/api/generate".to_string());
-    let model = std::env::var("RUSTY_BOT_LLM_MODEL")
+    let mut model = std::env::var("RUSTY_BOT_LLM_MODEL")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "mock".to_string());
-    let system_prompt = std::env::var("RUSTY_BOT_LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
+    let mut system_prompt = std::env::var("RUSTY_BOT_LLM_SYSTEM_PROMPT").unwrap_or_else(|_| {
         "You control a WoW character. Choose exactly one tool call per tick based on STATE_JSON. Prefer safe, minimal actions."
             .to_string()
     });
 
-    let goal = std::env::var("RUSTY_BOT_GOAL")
+    let mut goal = std::env::var("RUSTY_BOT_GOAL")
         .ok()
         .filter(|s| !s.trim().is_empty());
-    let tick_ms: u64 = std::env::var("RUSTY_BOT_AGENT_TICK_MS")
+    let mut tick_ms: u64 = std::env::var("RUSTY_BOT_AGENT_TICK_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(350);
+
+    // Override with command-line flags.
+    // Flags are simple `--flag value` pairs.
+    // Unknown flags are ignored with a warning.
+    apply_runner_cli_overrides(
+        std::env::args().skip(1),
+        &mut control_addr,
+        &mut endpoint,
+        &mut model,
+        &mut system_prompt,
+        &mut goal,
+        &mut tick_ms,
+    )?;
 
     let api = RemoteGameApi::connect(&control_addr).await?;
     let llm = RunnerLlm {
@@ -185,6 +199,46 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+
+fn apply_runner_cli_overrides(
+    args: impl IntoIterator<Item = String>,
+    control_addr: &mut String,
+    endpoint: &mut String,
+    model: &mut String,
+    system_prompt: &mut String,
+    goal: &mut Option<String>,
+    tick_ms: &mut u64,
+) -> anyhow::Result<()> {
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        if !arg.starts_with("--") {
+            eprintln!("Unexpected positional argument: {}", arg);
+            continue;
+        }
+
+        let flag = arg.trim_start_matches("--");
+        let Some(val) = it.next() else {
+            anyhow::bail!("Expected value after flag: --{flag}");
+        };
+
+        match flag {
+            "control-addr" => *control_addr = val,
+            "llm-endpoint" => *endpoint = val,
+            "llm-model" => *model = val,
+            "llm-system-prompt" => *system_prompt = val,
+            "goal" => *goal = Some(val),
+            "tick-ms" => {
+                *tick_ms = val
+                    .parse()
+                    .with_context(|| format!("tick-ms must be a number, got: {val}"))?;
+            }
+            _ => eprintln!("Unknown flag: --{}", flag),
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +256,46 @@ mod tests {
         let v = RemoteGameApi::invocation_to_wire_json(&inv);
         assert_eq!(v.get("schema_version").and_then(|v| v.as_u64()), Some(1));
         assert_eq!(v.get("name").and_then(|v| v.as_str()), Some("request_move"));
+    }
+
+    #[test]
+    fn runner_cli_overrides_apply() {
+        let mut control_addr = "127.0.0.1:7878".to_string();
+        let mut endpoint = "http://127.0.0.1:11435/api/generate".to_string();
+        let mut model = "mock".to_string();
+        let mut system_prompt = "default".to_string();
+        let mut goal: Option<String> = None;
+        let mut tick_ms: u64 = 350;
+
+        apply_runner_cli_overrides(
+            vec![
+                "--control-addr".to_string(),
+                "10.0.0.2:9999".to_string(),
+                "--llm-endpoint".to_string(),
+                "http://example.invalid/api/generate".to_string(),
+                "--llm-model".to_string(),
+                "llama".to_string(),
+                "--llm-system-prompt".to_string(),
+                "prompt".to_string(),
+                "--goal".to_string(),
+                "win".to_string(),
+                "--tick-ms".to_string(),
+                "123".to_string(),
+            ],
+            &mut control_addr,
+            &mut endpoint,
+            &mut model,
+            &mut system_prompt,
+            &mut goal,
+            &mut tick_ms,
+        )
+        .unwrap();
+
+        assert_eq!(control_addr, "10.0.0.2:9999");
+        assert_eq!(endpoint, "http://example.invalid/api/generate");
+        assert_eq!(model, "llama");
+        assert_eq!(system_prompt, "prompt");
+        assert_eq!(goal.as_deref(), Some("win"));
+        assert_eq!(tick_ms, 123);
     }
 }
