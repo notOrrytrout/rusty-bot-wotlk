@@ -96,10 +96,32 @@ impl Default for Proxy {
     }
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+struct Bot {
+    #[serde(default)]
+    #[allow(dead_code)]
+    enabled: bool,
+    #[serde(default)]
+    #[allow(dead_code)]
+    requires_real_client: bool,
+    #[serde(default)]
+    llm: Option<LlmConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct LlmConfig {
+    endpoint: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
+    num_ctx: Option<u32>,
+    keep_alive: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Config {
     connection: Option<Connection>,
     gateway: Option<Gateway>,
+    bot: Option<Bot>,
 }
 
 fn default_runtime_mode() -> RuntimeMode {
@@ -394,6 +416,12 @@ pub async fn run_proxy() -> anyhow::Result<()> {
         })
     };
 
+    let bot_llm = config
+        .bot
+        .as_ref()
+        .and_then(|b| b.llm.clone())
+        .unwrap_or_default();
+
     let world_task = tokio::spawn(async move {
         loop {
             let session = session_rx
@@ -408,7 +436,14 @@ pub async fn run_proxy() -> anyhow::Result<()> {
             let (client_stream, client_addr) = world_listener.accept().await?;
             println!("proxy.world.accepted client={client_addr}");
 
-            match handle_world_session(client_stream, session, control_listener.clone()).await {
+            match handle_world_session(
+                client_stream,
+                session,
+                control_listener.clone(),
+                bot_llm.clone(),
+            )
+            .await
+            {
                 Ok(()) => println!("proxy.world.closed"),
                 Err(err) => eprintln!("proxy.world.error {err:#}"),
             }
@@ -506,6 +541,7 @@ async fn handle_world_session(
     client_stream: TcpStream,
     session: WorldSession,
     control_listener: Arc<TcpListener>,
+    bot_llm: LlmConfig,
 ) -> anyhow::Result<()> {
     println!(
         "proxy.world.keys client_key_len={} server_key_len={}",
@@ -586,6 +622,7 @@ async fn handle_world_session(
         injection_guard.clone(),
         world_state.clone(),
         agent_rx,
+        bot_llm,
     ));
 
     tokio::select! {
@@ -1609,6 +1646,52 @@ mod injected_movement_observation_tests {
     }
 }
 
+#[cfg(test)]
+mod config_llm_tests {
+    use super::*;
+
+    #[test]
+    fn parses_bot_llm_from_toml() {
+        let text = r#"
+[connection]
+host = "127.0.0.1:3726"
+account_name = "t"
+password = "t"
+
+[gateway]
+mode = "gateway"
+auth_mode = "dual_srp"
+
+[gateway.proxy]
+login_listen = "127.0.0.1:3724"
+world_listen = "127.0.0.1:8086"
+control_listen = "127.0.0.1:7878"
+
+[bot]
+enabled = true
+requires_real_client = true
+
+[bot.llm]
+endpoint = "http://10.0.0.2:11434/api/generate"
+model = "qwen3:0.6b"
+timeout_ms = 30000
+num_ctx = 1024
+keep_alive = "10m"
+"#;
+
+        let cfg: Config = toml::from_str(text).unwrap();
+        let llm = cfg.bot.unwrap().llm.unwrap();
+        assert_eq!(
+            llm.endpoint.as_deref(),
+            Some("http://10.0.0.2:11434/api/generate")
+        );
+        assert_eq!(llm.model.as_deref(), Some("qwen3:0.6b"));
+        assert_eq!(llm.timeout_ms, Some(30000));
+        assert_eq!(llm.num_ctx, Some(1024));
+        assert_eq!(llm.keep_alive.as_deref(), Some("10m"));
+    }
+}
+
 async fn record_client_movement_observation(
     packet: &WorldPacket,
     injection_guard: &Arc<Mutex<InjectionGuardState>>,
@@ -2381,14 +2464,22 @@ async fn run_agent_llm_injector(
     injection_guard: Arc<Mutex<InjectionGuardState>>,
     world_state: Arc<Mutex<WorldState>>,
     mut control_rx: mpsc::Receiver<AgentControlCommand>,
+    bot_llm: LlmConfig,
 ) -> anyhow::Result<()> {
     let start_enabled = std::env::var("RUSTY_BOT_AGENT_ENABLED")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
     let endpoint = std::env::var("RUSTY_BOT_LLM_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:11435/api/generate".to_string());
-    let model = std::env::var("RUSTY_BOT_LLM_MODEL").unwrap_or_else(|_| "mock".to_string());
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or(bot_llm.endpoint.clone())
+        .unwrap_or_else(|| "http://127.0.0.1:11435/api/generate".to_string());
+    let model = std::env::var("RUSTY_BOT_LLM_MODEL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or(bot_llm.model.clone())
+        .unwrap_or_else(|| "mock".to_string());
     let use_vision = std::env::var("RUSTY_BOT_AGENT_USE_VISION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
@@ -2438,6 +2529,7 @@ async fn run_agent_llm_injector(
     let llm_timeout_ms: u64 = std::env::var("RUSTY_BOT_LLM_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
+        .or(bot_llm.timeout_ms)
         .unwrap_or(30_000);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(llm_timeout_ms))
@@ -2445,11 +2537,13 @@ async fn run_agent_llm_injector(
     let keep_alive = std::env::var("RUSTY_BOT_OLLAMA_KEEP_ALIVE")
         .ok()
         .filter(|s| !s.trim().is_empty())
+        .or(bot_llm.keep_alive.clone())
         .or_else(|| Some("10m".to_string()));
     // Optional per-request context limit for Ollama. If unset, Ollama uses its model default.
     let num_ctx: Option<u32> = std::env::var("RUSTY_BOT_LLM_NUM_CTX")
         .ok()
-        .and_then(|v| v.parse().ok());
+        .and_then(|v| v.parse().ok())
+        .or(bot_llm.num_ctx);
     let llm = ProxyLlmClient {
         client,
         endpoint: endpoint.clone(),

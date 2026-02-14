@@ -38,3 +38,12 @@ mode = "input"
 [bot]
 enabled = true
 requires_real_client = true
+
+[bot.llm]
+# Ollama-style endpoint. If unset, the proxy falls back to env vars, then a mock default.
+endpoint = "http://127.0.0.1:11434/api/generate"
+model = "qwen3:0.6b"
+# Keep prompts small to avoid giant KV caches on the Ollama side.
+num_ctx = 1024
+keep_alive = "10m"
+timeout_ms = 30000
