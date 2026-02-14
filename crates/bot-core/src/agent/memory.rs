@@ -199,7 +199,9 @@ impl AgentMemory {
 
                 if let Some(t) = target {
                     self.kill_missing_target_frames = 0;
-                    if let Some((hp, _max)) = t.hp && hp == 0 {
+                    if let Some((hp, _max)) = t.hp
+                        && hp == 0
+                    {
                         self.complete_goal("target_dead");
                         return;
                     }

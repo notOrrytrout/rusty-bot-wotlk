@@ -215,7 +215,9 @@ fn route_for_opcode(opcode: u32) -> InjectRoute {
         return InjectRoute::UpstreamOnly;
     }
 
-    if let Ok(op_u16) = u16::try_from(opcode) && is_world_move_opcode(op_u16) {
+    if let Ok(op_u16) = u16::try_from(opcode)
+        && is_world_move_opcode(op_u16)
+    {
         return InjectRoute::UpstreamOnly;
     }
 
@@ -763,7 +765,9 @@ async fn read_client_world_packets(
         // Human override: only treat *movement* packets as "human is actively driving".
         // The WoW client sends many other client->server packets periodically (time sync, keepalives,
         // etc). Counting all packets would keep the override permanently active and block the agent.
-        if let Ok(op_u16) = u16::try_from(packet.opcode) && is_world_move_opcode(op_u16) {
+        if let Ok(op_u16) = u16::try_from(packet.opcode)
+            && is_world_move_opcode(op_u16)
+        {
             let mut state = injection_guard.lock().await;
             state.last_human_action_at = Some(Instant::now());
         }
@@ -1184,7 +1188,8 @@ fn parse_opcode_u16(opcode: &str) -> anyhow::Result<u16> {
         .strip_prefix("0x")
         .or_else(|| opcode.strip_prefix("0X"))
     {
-        return u16::from_str_radix(hex, 16).with_context(|| format!("invalid opcode hex {opcode}"));
+        return u16::from_str_radix(hex, 16)
+            .with_context(|| format!("invalid opcode hex {opcode}"));
     }
     opcode
         .parse::<u16>()
@@ -1197,10 +1202,7 @@ fn parse_control_input_line(line: &str) -> anyhow::Result<ControlInput> {
         let mut v: serde_json::Value =
             serde_json::from_str(trimmed).with_context(|| "invalid json control request")?;
 
-        if let Some(version) = v
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
+        if let Some(version) = v.get("version").and_then(|v| v.as_u64()).map(|v| v as u32)
             && version != CONTROL_PROTOCOL_VERSION
         {
             anyhow::bail!(
@@ -2423,7 +2425,9 @@ impl ProxyAgentApi {
         let self_pos = ws.players.get(&self_guid).map(|p| p.position.clone())?;
         let mut best: Option<(u64, f32)> = None;
         for npc in ws.npcs.values() {
-            if let Some(entry) = entry && npc.entry != entry {
+            if let Some(entry) = entry
+                && npc.entry != entry
+            {
                 continue;
             }
             let dx = npc.position.x - self_pos.x;
@@ -2692,7 +2696,8 @@ impl AgentGameApi for ProxyAgentApi {
                         if let Some(pkt) = {
                             let g = self.injection_guard.lock().await;
                             g.last_demo_packet.clone()
-                        } && let Ok((guid, mi)) = try_parse_movement_payload(&pkt.body) {
+                        } && let Ok((guid, mi)) = try_parse_movement_payload(&pkt.body)
+                        {
                             let mut ws = self.world_state.lock().await;
                             apply_movement_observation_to_world(&mut ws, guid.0, &mi);
                         }
