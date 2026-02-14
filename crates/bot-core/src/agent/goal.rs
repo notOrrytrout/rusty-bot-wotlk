@@ -8,6 +8,8 @@ pub enum GoalKind {
     FollowNpcEntry(u32),
     GotoGuid { guid: u64, interact: bool },
     GotoNpcEntry { entry: u32, interact: bool },
+    KillGuid { guid: u64, slot: u8 },
+    KillNpcEntry { entry: u32, slot: u8 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,8 +34,14 @@ impl GoalPlan {
         // - "follow npc_entry=123"
         // - "goto guid=123 interact"
         // - "goto npc_entry=123 interact"
+        // - "kill guid=123"
+        // - "kill npc_entry=123 slot=1"
         let interact = t.contains("interact");
         let stop_distance = 3.5_f32;
+        let slot = extract_u32_kv(&t, "slot")
+            .or_else(|| extract_u32_kv(&t, "cast_slot"))
+            .unwrap_or(1)
+            .clamp(1, 12) as u8;
 
         let (verb, rest) = t.split_once(' ').unwrap_or_else(|| (t.as_str(), ""));
 
@@ -76,7 +84,22 @@ impl GoalPlan {
                     }
                 }
             }
+            "kill" | "attack" => {
+                // Kill is deterministic v0: select -> approach -> attackswing (`cast` tool in proxy).
+                if let Some(g) = guid {
+                    GoalKind::KillGuid { guid: g, slot }
+                } else if let Some(e) = entry {
+                    GoalKind::KillNpcEntry { entry: e, slot }
+                } else {
+                    return None;
+                }
+            }
             _ => return None,
+        };
+
+        let stop_distance = match &kind {
+            GoalKind::KillGuid { .. } | GoalKind::KillNpcEntry { .. } => 4.0,
+            _ => stop_distance,
         };
 
         Some(Self {
@@ -127,6 +150,53 @@ impl GoalPlan {
                     confirm: false,
                 });
             }
+
+            // If close enough and this is a kill goal, stop then attack.
+            if matches!(
+                self.kind,
+                GoalKind::KillGuid { .. } | GoalKind::KillNpcEntry { .. }
+            ) {
+                // If we're still moving, stop first so we don't overlap movement and attack.
+                if obs.derived.moving {
+                    return Some(ToolInvocation {
+                        call: ToolCall::RequestStop(super::wire::RequestStopArgs {
+                            kind: super::wire::StopKind::Move,
+                        }),
+                        confirm: false,
+                    });
+                }
+
+                // Ensure we are roughly facing the target before swinging.
+                if delta.abs() > 0.5 {
+                    let direction = if delta > 0.0 {
+                        TurnDirection::Left
+                    } else {
+                        TurnDirection::Right
+                    };
+                    let ms =
+                        ((delta.abs() / std::f32::consts::PI) * 900.0).clamp(150.0, 900.0) as u32;
+                    return Some(ToolInvocation {
+                        call: ToolCall::RequestTurn(RequestTurnArgs {
+                            direction,
+                            duration_ms: ms,
+                        }),
+                        confirm: false,
+                    });
+                }
+
+                let slot = match self.kind {
+                    GoalKind::KillGuid { slot, .. } | GoalKind::KillNpcEntry { slot, .. } => slot,
+                    _ => 1,
+                };
+                return Some(ToolInvocation {
+                    call: ToolCall::Cast(super::wire::CastArgs {
+                        slot,
+                        guid: Some(target_guid),
+                    }),
+                    confirm: false,
+                });
+            }
+
             // Otherwise ensure we're not running.
             if obs.derived.moving {
                 return Some(ToolInvocation {
@@ -180,6 +250,13 @@ impl GoalPlan {
                     .next()
                     .map(|e| (e.guid, e.pos))
             }
+            GoalKind::KillGuid { guid, .. } => find_guid(obs, guid).map(|e| (e.guid, e.pos)),
+            GoalKind::KillNpcEntry { entry, .. } => obs
+                .npcs_nearby
+                .iter()
+                .filter(|n| n.entry == Some(entry))
+                .next()
+                .map(|e| (e.guid, e.pos)),
         }
     }
 }
@@ -262,6 +339,9 @@ mod tests {
                 movement_time: 1,
                 hp: (1, 1),
                 level: 1,
+                class: 1,
+                race: 1,
+                gender: 0,
             }),
             npcs_nearby: vec![EntitySummary {
                 guid: npc_guid,
@@ -271,7 +351,7 @@ mod tests {
                     y: npc_y,
                     z: 0.0,
                 },
-                hp: None,
+                hp: Some((10, 10)),
             }],
             players_nearby: vec![],
             chat_log: vec![],
@@ -299,6 +379,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_kill_guid_defaults_slot_1() {
+        let p = GoalPlan::parse("kill guid=123").unwrap();
+        assert_eq!(p.kind, GoalKind::KillGuid { guid: 123, slot: 1 });
+        assert_eq!(p.stop_distance, 4.0);
+    }
+
+    #[test]
+    fn parse_kill_entry_with_slot() {
+        let p = GoalPlan::parse("kill npc_entry=55 slot=7").unwrap();
+        assert_eq!(p.kind, GoalKind::KillNpcEntry { entry: 55, slot: 7 });
+        assert_eq!(p.stop_distance, 4.0);
+    }
+
+    #[test]
     fn step_targets_then_moves() {
         let mut plan = GoalPlan::parse("goto npc_entry=55").unwrap();
         let obs = base_obs(0.0, 9, 55, 10.0, 0.0);
@@ -308,5 +402,30 @@ mod tests {
 
         let second = plan.step(&obs).unwrap();
         assert!(matches!(second.call, ToolCall::RequestMove(_)));
+    }
+
+    #[test]
+    fn kill_steps_target_then_move_then_cast() {
+        let mut plan = GoalPlan::parse("kill npc_entry=55 slot=2").unwrap();
+        let far = base_obs(0.0, 9, 55, 10.0, 0.0);
+
+        let first = plan.step(&far).unwrap();
+        assert!(matches!(first.call, ToolCall::TargetGuid(_)));
+
+        let second = plan.step(&far).unwrap();
+        assert!(matches!(second.call, ToolCall::RequestMove(_)));
+
+        // Close enough: should cast (unless moving; base_obs has moving=false).
+        let mut near = base_obs(0.0, 9, 55, 3.0, 0.0);
+        // Pretend we already moved close by updating self position.
+        near.self_state.as_mut().unwrap().pos.x = 0.5;
+        let third = plan.step(&near).unwrap();
+        match third.call {
+            ToolCall::Cast(args) => {
+                assert_eq!(args.slot, 2);
+                assert_eq!(args.guid, Some(9));
+            }
+            other => panic!("expected cast, got {other:?}"),
+        }
     }
 }

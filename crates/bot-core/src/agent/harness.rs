@@ -96,6 +96,43 @@ pub async fn tick(
         }
     }
 
+    // Combat defense: if something is attacking us and we're not already in an explicit kill goal,
+    // opportunistically hit back so the bot doesn't stand there taking damage.
+    if agent.executor.is_idle()
+        && agent.executor.queued_len() == 0
+        && obs.derived.in_combat
+        && obs.derived.attacker_guid.is_some()
+    {
+        let kill_goal_active = agent.memory.goal_state == Some(super::memory::GoalState::Active)
+            && agent
+                .memory
+                .goal_plan
+                .as_ref()
+                .map(|p| {
+                    matches!(
+                        p.kind,
+                        super::goal::GoalKind::KillGuid { .. }
+                            | super::goal::GoalKind::KillNpcEntry { .. }
+                    )
+                })
+                .unwrap_or(false);
+
+        if !kill_goal_active {
+            let attacker_guid = obs.derived.attacker_guid.unwrap_or(0);
+            if attacker_guid != 0 {
+                let tool = super::ToolInvocation {
+                    call: super::ToolCall::Cast(super::wire::CastArgs {
+                        slot: 1,
+                        guid: Some(attacker_guid),
+                    }),
+                    confirm: false,
+                };
+                agent.executor.offer_llm_tool(tool.clone());
+                return Ok(HarnessOutcome::Offered { tool });
+            }
+        }
+    }
+
     // Completion checks.
     if let Some((tool, result)) = agent.executor.tick_observation(&obs) {
         agent.memory.record(tool.clone(), result.clone());
@@ -310,6 +347,9 @@ mod tests {
                 movement_time: tick,
                 hp: (1, 1),
                 level: 1,
+                class: 1,
+                race: 1,
+                gender: 0,
             }),
             npcs_nearby: vec![],
             players_nearby: vec![],
@@ -482,6 +522,43 @@ mod tests {
         assert!(matches!(executed[0].call, ToolCall::RequestMove(_)));
         assert!(matches!(executed[1].call, ToolCall::RequestStop(_)));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn harness_defends_against_last_attacker_when_in_combat() -> anyhow::Result<()> {
+        let api = Arc::new(FakeGameApi::default());
+        let llm = Arc::new(FakeLlm::default());
+        let mut agent = AgentLoop::new("system");
+
+        let mut obs = base_obs(1);
+        obs.derived.in_combat = true;
+        obs.derived.attacker_guid = Some(9);
+        api.push_observation(obs);
+
+        let now = Instant::now();
+        let out = tick(
+            &mut agent,
+            api.as_ref(),
+            llm.as_ref(),
+            HarnessConfig::default(),
+            now,
+        )
+        .await?;
+
+        match out {
+            HarnessOutcome::Offered { tool } => match tool.call {
+                ToolCall::Cast(args) => {
+                    assert_eq!(args.slot, 1);
+                    assert_eq!(args.guid, Some(9));
+                }
+                other => panic!("expected cast, got {other:?}"),
+            },
+            other => panic!("expected offered, got {other:?}"),
+        }
+
+        // This defensive step should not have required an LLM poll.
+        assert_eq!(llm.prompt_count(), 0);
         Ok(())
     }
 

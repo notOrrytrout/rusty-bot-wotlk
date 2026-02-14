@@ -56,6 +56,43 @@ This starts a local mock LLM server and the standalone gateway proxy, and also c
 bash scripts/run_runner_with_mock.sh
 ```
 
+### Windows: Running The `.exe` (No Bash)
+
+On Windows, double-clicking `rusty-bot-proxy.exe` launches a normal console program. If it immediately closes, it usually means it hit an error and Windows closed the console window before you could read it.
+
+Recommended: run it from PowerShell so you can see logs and errors.
+
+1) Open PowerShell in the folder containing `rusty-bot-proxy.exe`
+```powershell
+cd C:\\path\\to\\rusty-bot-wotlk
+```
+
+2) Point the proxy at the repo-style `config/` folder (so it can find `config\\wow\\wotlk\\connection.toml`)
+```powershell
+$env:RUSTY_BOT_CONFIG_DIR = ".\\config"
+```
+
+3) (Optional) Start the mock LLM in a second terminal
+```powershell
+py .\\scripts\\mock_ollama.py
+```
+
+4) Run the proxy
+```powershell
+.\rusty-bot-proxy.exe
+```
+
+If you want to double-click something, create a `run_proxy.bat` next to the `.exe`:
+```bat
+@echo off
+set RUSTY_BOT_CONFIG_DIR=.\config
+set RUSTY_BOT_AGENT_ENABLED=1
+REM Optional: use the local mock LLM (start it separately with: py .\scripts\mock_ollama.py)
+REM set RUSTY_BOT_LLM_ENDPOINT=http://127.0.0.1:11435/api/generate
+rusty-bot-proxy.exe
+pause
+```
+
 ## Control Panel (Optional)
 
 If you want a simple interactive menu instead of manually typing `nc` JSON lines, run:

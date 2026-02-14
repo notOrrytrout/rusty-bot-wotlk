@@ -52,6 +52,10 @@ pub struct AgentMemory {
     #[serde(skip)]
     idle_frames: u32,
     #[serde(skip)]
+    kill_missing_target_frames: u32,
+    #[serde(skip)]
+    kill_saw_combat: bool,
+    #[serde(skip)]
     pub goal_plan: Option<GoalPlan>,
     #[serde(default)]
     pub last_error: Option<String>,
@@ -70,6 +74,8 @@ impl Default for AgentMemory {
             next_goal_id: 1,
             missing_self_frames: 0,
             idle_frames: 0,
+            kill_missing_target_frames: 0,
+            kill_saw_combat: false,
             goal_plan: None,
             last_error: None,
             history: VecDeque::new(),
@@ -90,6 +96,8 @@ impl AgentMemory {
         self.goal_state_reason = None;
         self.missing_self_frames = 0;
         self.idle_frames = 0;
+        self.kill_missing_target_frames = 0;
+        self.kill_saw_combat = false;
     }
 
     pub fn clear_goal(&mut self) {
@@ -99,6 +107,8 @@ impl AgentMemory {
         self.goal_state_reason = None;
         self.missing_self_frames = 0;
         self.idle_frames = 0;
+        self.kill_missing_target_frames = 0;
+        self.kill_saw_combat = false;
         self.goal_plan = None;
     }
 
@@ -170,6 +180,60 @@ impl AgentMemory {
             return;
         }
 
+        // Kill goals: completion/blocking based on target visibility + health.
+        if let Some(plan) = self.goal_plan.as_ref() {
+            let is_kill = matches!(
+                plan.kind,
+                super::goal::GoalKind::KillGuid { .. } | super::goal::GoalKind::KillNpcEntry { .. }
+            );
+            if is_kill {
+                if obs.derived.in_combat {
+                    self.kill_saw_combat = true;
+                }
+
+                let target_guid = plan.last_target_guid;
+                let target = target_guid.and_then(|g| {
+                    obs.npcs_nearby
+                        .iter()
+                        .find(|e| e.guid == g)
+                        .or_else(|| obs.players_nearby.iter().find(|e| e.guid == g))
+                });
+
+                if let Some(t) = target {
+                    self.kill_missing_target_frames = 0;
+                    if let Some((hp, _max)) = t.hp {
+                        if hp == 0 {
+                            self.complete_goal("target_dead");
+                            return;
+                        }
+                    }
+                } else {
+                    // If we haven't selected a target yet, don't penalize.
+                    if target_guid.is_some() {
+                        self.kill_missing_target_frames =
+                            self.kill_missing_target_frames.saturating_add(1);
+                    } else {
+                        self.kill_missing_target_frames = 0;
+                    }
+
+                    // If the target vanished after we saw combat, assume it died/despawned.
+                    if self.kill_saw_combat
+                        && !obs.derived.in_combat
+                        && self.kill_missing_target_frames >= 10
+                    {
+                        self.complete_goal("target_gone");
+                        return;
+                    }
+
+                    // Otherwise, if we can't see the target for a while, block (avoids wandering).
+                    if self.kill_missing_target_frames >= 20 {
+                        self.block_goal("target_not_visible");
+                        return;
+                    }
+                }
+            }
+        }
+
         // Minimal completion heuristic for "stop/idle" type goals.
         let goal = self.goal.as_deref().unwrap_or("").to_ascii_lowercase();
         let wants_idle = goal.contains("idle") || goal.contains("stop");
@@ -205,6 +269,9 @@ mod tests {
                 movement_time: 1,
                 hp: (1, 1),
                 level: 1,
+                class: 1,
+                race: 1,
+                gender: 0,
             }),
             npcs_nearby: vec![],
             players_nearby: vec![],
@@ -227,6 +294,46 @@ mod tests {
             chat_log: vec![],
             combat_log: vec![],
             derived: DerivedFacts::default(),
+        }
+    }
+
+    fn obs_with_npc(guid: u64, hp: u32, max_hp: u32, in_combat: bool) -> Observation {
+        Observation {
+            tick: 1,
+            self_guid: 1,
+            self_state: Some(SelfSummary {
+                guid: 1,
+                pos: Vec3 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                orient: 0.0,
+                movement_flags: 0,
+                movement_time: 1,
+                hp: (1, 1),
+                level: 1,
+                class: 1,
+                race: 1,
+                gender: 0,
+            }),
+            npcs_nearby: vec![crate::agent::observation::EntitySummary {
+                guid,
+                entry: Some(55),
+                pos: Vec3 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                hp: Some((hp, max_hp)),
+            }],
+            players_nearby: vec![],
+            chat_log: vec![],
+            combat_log: vec![],
+            derived: DerivedFacts {
+                in_combat,
+                ..DerivedFacts::default()
+            },
         }
     }
 
@@ -255,5 +362,16 @@ mod tests {
 
         assert_eq!(mem.goal_state, Some(GoalState::Completed));
         assert_eq!(mem.goal_state_reason.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn kill_goal_completes_when_target_hp_zero() {
+        let mut mem = AgentMemory::default();
+        mem.set_goal("kill npc_entry=55");
+        mem.goal_plan.as_mut().unwrap().last_target_guid = Some(9);
+
+        mem.tick_goal_v0(&obs_with_npc(9, 0, 10, true));
+        assert_eq!(mem.goal_state, Some(GoalState::Completed));
+        assert_eq!(mem.goal_state_reason.as_deref(), Some("target_dead"));
     }
 }

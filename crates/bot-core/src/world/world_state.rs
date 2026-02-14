@@ -64,22 +64,30 @@ const PLAYER_VISIBLE_ITEM_18_ENTRYID: u32 = 83;
 
 #[derive(Default)]
 pub struct WorldState {
+    /// Best-effort self GUID (seeded from client login/movement observations by the proxy).
+    pub self_guid: Option<u64>,
     pub players: HashMap<u64, PlayerCurrentState>,
     pub other_players: HashMap<u64, OtherPlayerState>,
     pub npcs: HashMap<u64, NpcCurrentState>,
     pub chat_log: Vec<String>,
     pub combat_log: Vec<String>,
+    /// Best-effort "who last hit us" signal (GUID of the attacker), plus the tick when we last saw it.
+    pub last_attacker_guid: Option<u64>,
+    pub last_attacked_tick: Option<u64>,
     pub tick: Wrapping<u64>,
 }
 
 impl WorldState {
     pub fn new() -> Self {
         Self {
+            self_guid: None,
             players: HashMap::new(),
             other_players: HashMap::new(),
             npcs: HashMap::new(),
             chat_log: Vec::new(),
             combat_log: Vec::new(),
+            last_attacker_guid: None,
+            last_attacked_tick: None,
             tick: Wrapping(0),
         }
     }

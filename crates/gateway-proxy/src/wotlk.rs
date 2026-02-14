@@ -26,6 +26,10 @@ pub mod opcode {
         // Chat/emote.
         pub const CMSG_TEXT_EMOTE: u32 = 260;
 
+        // Character login (client selects a character and enters the world).
+        // AzerothCore/TrinityCore WotLK opcode map: CMSG_PLAYER_LOGIN = 0x03D.
+        pub const CMSG_PLAYER_LOGIN: u16 = 0x03D;
+
         // Targeting / interaction / combat basics.
         // Values are for WoW 3.3.5a / TrinityCore-style opcode maps.
         pub const CMSG_SET_SELECTION: u32 = 0x013D;

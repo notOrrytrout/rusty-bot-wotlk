@@ -196,7 +196,7 @@ Acceptance checks
 - [x] Add rate limiting:
   - [x] Max LLM calls per minute (`RUSTY_BOT_LLM_MAX_CALLS_PER_MIN`)
   - [x] Max injections per second (`RUSTY_BOT_INJECT_MAX_PER_SEC`)
-- [ ] Add “dangerous action” gate framework (not used in MVP tools, but required for future):
+- [x] Add “dangerous action” gate framework (not used in MVP tools, but required for future):
   - [x] “requires_confirm” tool metadata (scaffold)
   - [x] “confirm=true” must be present in args to execute (scaffold)
 
@@ -259,26 +259,26 @@ Acceptance checks
 
 ### 10) First Real Capabilities (After Framework Is Stable)
 These depend on new packet support + state tracking; keep them blocked until framework above is solid.
- - [ ] Targeting tools:
+- [x] Targeting tools:
   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
   - [x] Proxy packet injection (v0) for `target_guid` and `target_nearest_npc` (`crates/gateway-proxy/src/proxy.rs`)
   - [x] `target_guid { guid }` (v0: `CMSG_SET_SELECTION`)
   - [x] `target_nearest_npc { entry?: u32 }` (v0: chooses nearest from `WorldState`)
- - [x] `interact { guid }` (packet support + completion checks) (v0: `CMSG_GOSSIP_HELLO`)
-   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
-   - [x] Proxy packet injection (v0) for `interact` via `CMSG_GOSSIP_HELLO` (`crates/gateway-proxy/src/proxy.rs`)
- - [ ] “Follow target” goal v1 (turn + move + stop loops)
- - [ ] Combat v0 (very crude):
+- [x] `interact { guid }` (packet support + completion checks) (v0: `CMSG_GOSSIP_HELLO`)
+  - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
+  - [x] Proxy packet injection (v0) for `interact` via `CMSG_GOSSIP_HELLO` (`crates/gateway-proxy/src/proxy.rs`)
+- [x] “Follow target” goal v1 (turn + move + stop loops)
+- [x] Combat v0 (very crude):
   - [x] Tool-call schema + validation exists in `rusty-bot-core` (`crates/bot-core/src/agent/wire.rs`)
   - [x] Proxy packet injection (v0) for `cast` implemented as `CMSG_ATTACKSWING` when `guid` is provided (`crates/gateway-proxy/src/proxy.rs`)
   - [x] `cast { slot, guid? }` (v0: implemented as attackswing; real cast/use-action is later)
   - [x] stop moving when combat detected (v0: preempt continuous movement when `derived.in_combat`)
   - [x] detect “something happened” via combat log/state deltas (v0: `derived.in_combat`)
- - [ ] Loot v0 (requires state additions; define later)
+- [ ] Loot v0 (requires state additions; define later)
 
 ---
 
 ## Notes (Keep Short, Update As We Go)
-- Date: 2026-02-13
+- Date: 2026-02-14
 - Workspace: `<repo-root>`
-- Baseline: `cargo test` (workspace) PASS on 2026-02-13
+- Baseline: `cargo test` (workspace) PASS on 2026-02-14

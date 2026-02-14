@@ -37,7 +37,7 @@ use rusty_bot_core::world::world_state::WorldState;
 
 use crate::config_loader::ConfigLoader;
 use crate::wotlk::movement::{
-    JumpInfo, MovementExtraFlags, MovementFlags, MovementInfo, PackedGuid,
+    JumpInfo, MovementExtraFlags, MovementFlags, MovementInfo, OrientedPoint3D, PackedGuid, Point3D,
 };
 use crate::wotlk::opcode::Opcode;
 use crate::wotlk::rc4::{Decryptor, Encryptor};
@@ -771,6 +771,10 @@ async fn read_client_world_packets(
             }
         }
 
+        // Capture self GUID as early as possible (before any movement templates exist).
+        // This enables agent observations/goals even if the player hasn't moved yet.
+        record_client_login_observation(&packet, &injection_guard, &world_state).await;
+
         record_client_movement_observation(&packet, &injection_guard, &world_state).await;
 
         if suppress_client_movement {
@@ -787,6 +791,42 @@ async fn read_client_world_packets(
             return Ok(());
         }
     }
+}
+
+async fn record_client_login_observation(
+    packet: &WorldPacket,
+    injection_guard: &Arc<Mutex<InjectionGuardState>>,
+    world_state: &Arc<Mutex<WorldState>>,
+) {
+    let Ok(opcode) = u16::try_from(packet.opcode) else {
+        return;
+    };
+    if opcode != Opcode::CMSG_PLAYER_LOGIN {
+        return;
+    }
+    if packet.body.len() < 8 {
+        return;
+    }
+
+    // AzerothCore WotLK: CMSG_PLAYER_LOGIN payload begins with ObjectGuid (uint64).
+    let mut guid_bytes = [0u8; 8];
+    guid_bytes.copy_from_slice(&packet.body[..8]);
+    let guid = u64::from_le_bytes(guid_bytes);
+    if guid == 0 {
+        return;
+    }
+
+    {
+        let mut state = injection_guard.lock().await;
+        state.last_self_guid = Some(guid);
+    }
+
+    // Ensure an entry exists so synthetic movement injection has somewhere to anchor state.
+    let mut ws = world_state.lock().await;
+    ws.self_guid = Some(guid);
+    ws.players
+        .entry(guid)
+        .or_insert_with(|| PlayerCurrentState::new(guid));
 }
 
 async fn write_client_world_packets(
@@ -1647,6 +1687,92 @@ mod injected_movement_observation_tests {
 }
 
 #[cfg(test)]
+mod agent_movement_fallback_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn player_login_packet_sets_self_guid() {
+        let injection_guard = Arc::new(Mutex::new(InjectionGuardState::default()));
+        let world_state = Arc::new(Mutex::new(WorldState::new()));
+
+        let guid = 0x0102030405060708u64;
+        let pkt = WorldPacket {
+            opcode: Opcode::CMSG_PLAYER_LOGIN as u32,
+            body: guid.to_le_bytes().to_vec(),
+        };
+
+        record_client_login_observation(&pkt, &injection_guard, &world_state).await;
+
+        assert_eq!(
+            injection_guard.lock().await.last_self_guid,
+            Some(guid),
+            "expected login to seed self guid"
+        );
+        assert!(
+            world_state.lock().await.players.contains_key(&guid),
+            "expected login to seed player entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn synthetic_movement_packet_is_parseable_and_advances_world_state_without_template() {
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        let (down_tx, _down_rx) = mpsc::channel(8);
+
+        let injection_guard = Arc::new(Mutex::new(InjectionGuardState {
+            last_self_guid: Some(1),
+            ..InjectionGuardState::default()
+        }));
+        let world_state = Arc::new(Mutex::new({
+            let mut ws = WorldState::new();
+            let mut me = PlayerCurrentState::new(1);
+            me.position.x = 0.0;
+            me.position.y = 0.0;
+            me.position.z = 0.0;
+            me.position.orientation = 0.0;
+            ws.players.insert(1, me);
+            ws
+        }));
+
+        let limiter = Arc::new(Mutex::new(RateLimiter::new(10_000, 10_000)));
+        let api = ProxyAgentApi {
+            upstream_tx: up_tx,
+            downstream_tx: down_tx,
+            injection_guard: injection_guard.clone(),
+            world_state: world_state.clone(),
+            observation_builder: Mutex::new(AgentObservationBuilder::default()),
+            echo_to_client: false,
+            limiter,
+        };
+
+        // Execute a movement tool with no client movement template. This should fall back to
+        // a synthetic movement packet and still update our local WorldState.
+        let res = api
+            .execute_tool(AgentToolInvocation {
+                call: AgentToolCall::RequestMove(rusty_bot_core::agent::wire::RequestMoveArgs {
+                    direction: rusty_bot_core::agent::wire::MoveDirection::Forward,
+                    duration_ms: 200,
+                }),
+                confirm: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.status, AgentToolStatus::Ok);
+
+        // Verify something was sent upstream and it parses as a movement payload for our guid.
+        let pkt = up_rx.recv().await.expect("expected injected packet");
+        assert_eq!(pkt.opcode, Opcode::MSG_MOVE_START_FORWARD as u32);
+        let (guid, _mi) = try_parse_movement_payload(&pkt.body).expect("parse movement payload");
+        assert_eq!(guid.0, 1);
+
+        // Verify local position advanced on +X (orientation 0.0 => cos=1, sin=0).
+        let ws = world_state.lock().await;
+        let me = ws.players.get(&1).unwrap();
+        assert!(me.position.x > 0.0, "expected x to advance, got {}", me.position.x);
+    }
+}
+
+#[cfg(test)]
 mod config_llm_tests {
     use super::*;
 
@@ -1737,6 +1863,7 @@ async fn record_client_movement_observation(
 }
 
 fn apply_movement_observation_to_world(ws: &mut WorldState, guid: u64, mi: &MovementInfo) {
+    ws.self_guid.get_or_insert(guid);
     let player = ws
         .players
         .entry(guid)
@@ -1787,11 +1914,22 @@ async fn record_server_world_observation(
             }
         }
         SMSG_ATTACKERSTATEUPDATE => {
-            // Keep this crude for now; better parsing can be added when needed.
-            ws.add_combat_message(format!(
-                "SMSG_ATTACKERSTATEUPDATE len={}",
-                packet.body.len()
-            ));
+            // Parse just enough to know who attacked whom.
+            if let Ok((_hit, attacker, target)) = try_parse_smsg_attackerstateupdate(&packet.body) {
+                ws.add_combat_message(format!(
+                    "SMSG_ATTACKERSTATEUPDATE attacker={} target={}",
+                    attacker, target
+                ));
+                if ws.self_guid == Some(target) {
+                    ws.last_attacker_guid = Some(attacker);
+                    ws.last_attacked_tick = Some(ws.tick.0);
+                }
+            } else {
+                ws.add_combat_message(format!(
+                    "SMSG_ATTACKERSTATEUPDATE unparseable len={}",
+                    packet.body.len()
+                ));
+            }
         }
         _ => {}
     }
@@ -2293,7 +2431,38 @@ impl AgentGameApi for ProxyAgentApi {
                 Some(self.limiter.clone()),
             );
             for cmd in cmds {
-                match injector.inject_command(&cmd).await? {
+                let mut outcome = injector.inject_command(&cmd).await?;
+
+                // If the user never moved (or movement templates are otherwise unavailable),
+                // fall back to constructing a minimal, AzerothCore-compatible movement payload
+                // from our current WorldState snapshot.
+                if matches!(outcome, InjectCommandOutcome::MissingTemplate) {
+                    if let Some(pkt) = prepare_synthetic_movement_packet(
+                        &cmd,
+                        &self.injection_guard,
+                        &self.world_state,
+                    )
+                    .await
+                    {
+                        let opcode = pkt.opcode;
+                        let body_len = pkt.body.len();
+                        if let Some(pkt) = injector.apply_guard(pkt).await {
+                            match injector.send(pkt).await {
+                                Ok(()) => {
+                                    outcome = InjectCommandOutcome::Injected { opcode, body_len };
+                                }
+                                Err(err) if format!("{err:#}").contains("rate_limited") => {
+                                    outcome = InjectCommandOutcome::RateLimited;
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        } else {
+                            outcome = InjectCommandOutcome::Suppressed;
+                        }
+                    }
+                }
+
+                match outcome {
                     InjectCommandOutcome::Injected { .. } => {
                         // The server does not necessarily echo self-movement back quickly, and we do not
                         // echo injected packets to the client (unsafe). To keep goal-follow/goto stable,
@@ -2914,6 +3083,77 @@ async fn prepare_demo_packet(
     Some(packet)
 }
 
+fn unix_millis_u32() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    (ms as u64 & 0xFFFF_FFFF) as u32
+}
+
+async fn prepare_synthetic_movement_packet(
+    command: &str,
+    injection_guard: &Arc<Mutex<InjectionGuardState>>,
+    world_state: &Arc<Mutex<WorldState>>,
+) -> Option<WorldPacket> {
+    let opcode = map_demo_command_to_opcode(command)? as u32;
+
+    // We need a stable "self" guid; infer it from login if possible, otherwise we can't safely act.
+    let self_guid = injection_guard.lock().await.last_self_guid?;
+
+    // Anchor the movement packet off of the last known position/orientation in our local world snapshot.
+    let (x, y, z, orient) = {
+        let ws = world_state.lock().await;
+        let p = ws.players.get(&self_guid)?;
+        (
+            p.position.x,
+            p.position.y,
+            p.position.z,
+            p.position.orientation,
+        )
+    };
+
+    let mut state = injection_guard.lock().await;
+    let now = Instant::now();
+    let delta_ms = state
+        .last_demo_inject_at
+        .map(|t| now.saturating_duration_since(t).as_millis() as u32)
+        .unwrap_or(200)
+        .clamp(120, 2_000);
+    let next_time = state
+        .last_client_move_time
+        .unwrap_or_else(unix_millis_u32)
+        .wrapping_add(delta_ms);
+
+    let mut movement_info = MovementInfo {
+        movement_flags: MovementFlags::NONE,
+        movement_extra_flags: MovementExtraFlags::NONE,
+        time: next_time,
+        location: OrientedPoint3D {
+            point: Point3D { x, y, z },
+            direction: orient,
+        },
+        transport: None,
+        pitch: None,
+        fall_time: 0,
+        jump_info: None,
+        spline_elevation: None,
+    };
+
+    apply_demo_command_to_movement(&mut movement_info, command)?;
+    demo_advance_kinematics(&mut movement_info, &command.to_ascii_lowercase(), delta_ms);
+
+    let body = pack_movement_payload(PackedGuid(self_guid), &movement_info).ok()?;
+    let packet = WorldPacket { opcode, body };
+
+    // Mirror prepare_demo_packet: update the time template and keep the last synthetic packet around.
+    state.last_client_move_time = Some(next_time);
+    state.last_demo_packet = Some(packet.clone());
+    state.last_demo_inject_at = Some(now);
+    Some(packet)
+}
+
 fn build_demo_packet_from_template(
     template: &WorldPacket,
     command: &str,
@@ -3327,6 +3567,14 @@ fn try_parse_movement_payload(body: &[u8]) -> anyhow::Result<(PackedGuid, Moveme
     let movement_info = MovementInfo::read_options(&mut cursor, Endian::Little, ())
         .context("read movement info from movement body")?;
     Ok((guid, movement_info))
+}
+
+fn try_parse_smsg_attackerstateupdate(body: &[u8]) -> anyhow::Result<(u32, u64, u64)> {
+    let mut cur = Cursor::new(body);
+    let hit_info = ReadBytesExt::read_u32::<LittleEndian>(&mut cur)?;
+    let attacker = PackedGuid::read_options(&mut cur, Endian::Little, ())?.0;
+    let target = PackedGuid::read_options(&mut cur, Endian::Little, ())?.0;
+    Ok((hit_info, attacker, target))
 }
 
 fn pack_movement_payload(

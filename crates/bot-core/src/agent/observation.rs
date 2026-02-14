@@ -44,6 +44,9 @@ pub struct DerivedFacts {
     /// Best-effort reason string (short and stable) for why we suspect we're stuck.
     #[serde(default)]
     pub stuck_reason: Option<String>,
+    /// Best-effort "who is attacking us" guid, if known.
+    #[serde(default)]
+    pub attacker_guid: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -65,6 +68,11 @@ pub struct SelfSummary {
     pub movement_time: u64,
     pub hp: (u32, u32),
     pub level: u8,
+    /// WoW class id (1..=11 for WotLK). Kept numeric to avoid baking protocol enums into prompts.
+    pub class: u8,
+    /// WoW race id.
+    pub race: u8,
+    pub gender: u8,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -109,6 +117,9 @@ impl Observation {
             movement_time: p.timestamp,
             hp: (p.health, p.max_health),
             level: p.level,
+            class: p.class,
+            race: p.race,
+            gender: p.gender,
         });
 
         let self_pos = self_state.as_ref().map(|s| s.pos);
@@ -207,6 +218,14 @@ impl ObservationBuilder {
             .last_combat_tick
             .map(|t| world.tick.0.saturating_sub(t) <= COMBAT_RECENT_TICKS)
             .unwrap_or(false);
+
+        // If we have a "last attacker" signal, treat that as combat too (more direct than log growth).
+        if let (Some(att), Some(tick)) = (world.last_attacker_guid, world.last_attacked_tick) {
+            if world.tick.0.saturating_sub(tick) <= COMBAT_RECENT_TICKS {
+                obs.derived.attacker_guid = Some(att);
+                obs.derived.in_combat = true;
+            }
+        }
 
         if let Some(self_state) = obs.self_state.as_ref() {
             const MOVE_MASK: u32 =
