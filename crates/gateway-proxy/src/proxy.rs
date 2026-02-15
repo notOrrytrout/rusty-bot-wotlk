@@ -173,7 +173,13 @@ const REALM_LIST_OP: u8 = 16;
 const EARLY_PACKET_TRACE_LIMIT: usize = 20;
 const SMSG_AUTH_CHALLENGE_OPCODE: u32 = 0x01ec;
 const SMSG_AUTH_RESPONSE_OPCODE: u32 = 0x01ee;
-const CMSG_AUTH_SESSION_OPCODE: u32 = 0x01ed;
+/// Opcode for the first world packet sent by a client.
+///
+/// The value is `0x01ED`, as defined in the AzerothCore source
+/// (`azerothcore-wotlk/src/server/game/Server/Protocol/Opcodes.h` line 523
+/// and the corresponding registration in `Opcodes.cpp`).  It is
+/// intentionally kept as a separate constant for clarity and testability.
+pub const CMSG_AUTH_SESSION_OPCODE: u32 = 0x01ed;
 
 #[derive(Clone)]
 struct WorldSession {

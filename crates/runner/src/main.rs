@@ -199,7 +199,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-
 fn apply_runner_cli_overrides(
     args: impl IntoIterator<Item = String>,
     control_addr: &mut String,
