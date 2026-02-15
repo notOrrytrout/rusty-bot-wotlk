@@ -211,8 +211,7 @@ fn apply_runner_cli_overrides(
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         if !arg.starts_with("--") {
-            eprintln!("Unexpected positional argument: {}", arg);
-            continue;
+            anyhow::bail!("Unexpected positional argument: {}", arg);
         }
 
         let flag = arg.trim_start_matches("--");
@@ -231,7 +230,7 @@ fn apply_runner_cli_overrides(
                     .parse()
                     .with_context(|| format!("tick-ms must be a number, got: {val}"))?;
             }
-            _ => eprintln!("Unknown flag: --{}", flag),
+            _ => anyhow::bail!("Unknown flag: --{flag}"),
         }
     }
 
@@ -296,5 +295,54 @@ mod tests {
         assert_eq!(system_prompt, "prompt");
         assert_eq!(goal.as_deref(), Some("win"));
         assert_eq!(tick_ms, 123);
+    }
+
+    #[test]
+    fn runner_cli_overrides_unknown_flag_is_error() {
+        let mut control_addr = "127.0.0.1:7878".to_string();
+        let mut endpoint = "http://127.0.0.1:11435/api/generate".to_string();
+        let mut model = "mock".to_string();
+        let mut system_prompt = "default".to_string();
+        let mut goal: Option<String> = None;
+        let mut tick_ms: u64 = 350;
+
+        let err = apply_runner_cli_overrides(
+            vec!["--nope".to_string(), "x".to_string()],
+            &mut control_addr,
+            &mut endpoint,
+            &mut model,
+            &mut system_prompt,
+            &mut goal,
+            &mut tick_ms,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Unknown flag: --nope"));
+    }
+
+    #[test]
+    fn runner_cli_overrides_positional_arg_is_error() {
+        let mut control_addr = "127.0.0.1:7878".to_string();
+        let mut endpoint = "http://127.0.0.1:11435/api/generate".to_string();
+        let mut model = "mock".to_string();
+        let mut system_prompt = "default".to_string();
+        let mut goal: Option<String> = None;
+        let mut tick_ms: u64 = 350;
+
+        let err = apply_runner_cli_overrides(
+            vec!["positional".to_string()],
+            &mut control_addr,
+            &mut endpoint,
+            &mut model,
+            &mut system_prompt,
+            &mut goal,
+            &mut tick_ms,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Unexpected positional argument: positional")
+        );
     }
 }
